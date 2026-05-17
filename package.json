@@ -7,6 +7,13 @@
   "type": "commonjs",
   "main": "src/index.js",
   "types": "src/types.d.ts",
+  "exports": {
+    ".": "./src/index.js",
+    "./signers": "./src/runtime/signers.js",
+    "./cheatcodes": "./src/runtime/cheatcodes.js",
+    "./time": "./src/runtime/time.js",
+    "./bridge": "./src/runtime/ethers-bridge.js"
+  },
   "files": [
     "src/**/*",
     "docker/**/*",
