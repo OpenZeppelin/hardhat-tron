@@ -6,9 +6,8 @@
 // three independent surfaces:
 //
 //   - compile/    tron-solc compile pipeline (subtask hooks +
-//                 SHA-256-verified wasm downloader). Replaces
-//                 @layerzerolabs/hardhat-tron with a tighter,
-//                 single-source-of-truth design.
+//                 SHA-256-verified wasm downloader, single source of
+//                 truth via `solidity.compilers`, glob include/exclude).
 //
 //   - runtime/    `hre.tre.*` helpers (TronWeb wrapper, cheatcodes,
 //                 deploy bridge, signers, time-warp, http keep-alive)

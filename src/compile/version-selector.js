@@ -1,17 +1,18 @@
 //
-// plugin/compile/version-selector.js
+// src/compile/version-selector.js
 //
 // Hooks `TASK_COMPILE_SOLIDITY_GET_COMPILATION_JOB_FOR_FILE`. Two
-// design choices that differ from LZ:
+// design choices:
 //
-//   1. We do NOT mutate source files. LZ's plugin had a separate
-//      `READ_FILE` hook that regex-rewrote pragma lines to satisfy
-//      version constraints. That makes the source the compiler sees
-//      differ from the source on disk -- source maps, stack traces,
-//      and IDE jumps all go subtly wrong. We refuse to do that.
+//   1. We do NOT mutate source files. Pragma rewriting via a
+//      READ_FILE hook would make the source the compiler sees differ
+//      from the source on disk -- source maps, stack traces, and IDE
+//      jumps all go subtly wrong. If a pragma doesn't match the
+//      configured tron-solc version, that's an error worth surfacing,
+//      not a regex to paper over.
 //
 //   2. Version override is opt-in via `versionPragmaOverride: true`.
-//      Without it, contracts whose pragma doesn't satisfy our
+//      Without it, contracts whose pragma doesn't satisfy the
 //      configured solidity.version surface as a normal Hardhat
 //      "no compatible compiler" error. With it, we force-override
 //      the compilation job's version to ours -- but the source on
@@ -20,9 +21,7 @@
 //
 // Either way: we don't touch `solidityConfig.settings`. The user
 // configured those in `solidity.settings` and they apply unchanged.
-// LZ shallow-merged `optimizer` and `metadata` from a separate
-// `tronSolc.compilers[].settings` block, which encouraged the dual-
-// source-of-truth that's now gone.
+// No parallel settings block, no shallow-merge surprises.
 //
 
 const { isActive } = require('./config');

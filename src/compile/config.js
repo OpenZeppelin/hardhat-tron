@@ -2,22 +2,27 @@
 // src/compile/config.js
 //
 // Registers the `tre.compiler.*` config block via Hardhat's
-// extendConfig hook, with full defaulting and validation. Design
-// decisions that diverge from @layerzerolabs/hardhat-tron:
+// extendConfig hook, with full defaulting and validation.
 //
-//   * NO `enable` flag. Loading the plugin is consent. Opt out via
-//     `tre.compiler.disabled: true` for the rare neutralisation case.
+// Design notes:
 //
-//   * NO parallel `compilers` array shadowing `solidity.compilers`.
+//   * No `enable` flag. Loading the plugin is consent. Opt out via
+//     `tre.compiler.disabled: true` for the rare neutralisation case
+//     (e.g. a downstream pipeline that wants to neutralise tron-solc
+//     for one CI step).
+//
+//   * No parallel `compilers` array shadowing `solidity.compilers`.
 //     We read directly from `solidity:` -- one source of truth for
-//     the version and the settings.
+//     the version and the settings, no duplication to keep in sync.
 //
-//   * `include`/`exclude` as glob arrays, not basename Sets. Globs
-//     can't accidentally include `Test.sol` when you meant
-//     `contracts/foo/Test.sol`; basenames could.
+//   * `include`/`exclude` as glob arrays, not basename sets. Globs
+//     are unambiguous when two files share a basename in different
+//     directories.
 //
 //   * Activation is config-driven via `target`, not `--network`
-//     gated. Tron-only projects get tron-solc unconditionally.
+//     gated. Tron-only projects get tron-solc unconditionally;
+//     dual-target projects can scope activation to a tron-typed
+//     network via `target: 'tron-when-network-tron'`.
 //
 // Validation runs at extendConfig time so the user sees a clear
 // error at hardhat init, not partway through a compile.

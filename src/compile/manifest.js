@@ -1,11 +1,12 @@
 //
-// plugin/compile/manifest.js
+// src/compile/manifest.js
 //
 // Source-of-truth for which tron-solc versions exist and what their
 // SHA-256 digests should be. The canonical mirror is
 // `tronprotocol/solc-bin` -- it publishes a `list.json` with the same
-// shape as `ethereum/solc-bin`, so we can do real integrity verification
-// instead of LZ's loadability-only check.
+// shape as `ethereum/solc-bin`, so we can do real integrity
+// verification against a signed manifest rather than relying on
+// "does the file load?" as a proxy for correctness.
 //
 // Caching strategy:
 //   * Cache list.json under Hardhat's own compiler-cache root so a

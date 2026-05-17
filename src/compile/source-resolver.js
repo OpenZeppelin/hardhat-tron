@@ -1,21 +1,20 @@
 //
-// plugin/compile/source-resolver.js
+// src/compile/source-resolver.js
 //
 // Hooks `TASK_COMPILE_SOLIDITY_GET_SOURCE_PATHS` to support glob-based
-// include/exclude filtering. Different from LZ in three ways:
+// include/exclude filtering.
 //
-//   1. Globs, not basenames. `contracts/foo/Test.sol` and
-//      `contracts/bar/Test.sol` can be addressed independently.
+//   * Globs, not basenames. `contracts/foo/Test.sol` and
+//     `contracts/bar/Test.sol` are addressable independently --
+//     basename-only filtering would silently conflate them.
 //
-//   2. Both include AND exclude. LZ only supported a positive
-//      basename allowlist.
+//   * Both include AND exclude supported. Empty arrays = no
+//     restriction; matches Hardhat's default discovery.
 //
-//   3. Empty include = compile everything (runSuper). LZ treated
-//      empty filter the same way but via a `.size === 0` check on a
-//      Set; ours is the same semantics expressed via array length.
-//      Matters because the batched-compile task swaps `include`
-//      arrays in place -- the array reference may change between
-//      compiles, so we re-read every invocation.
+//   * We re-read `hre.config.tre.compiler.include` on every
+//     invocation. The batched-compile task swaps the array between
+//     passes; the array reference itself may change, so we don't
+//     cache anything across calls.
 //
 
 const path = require('node:path');

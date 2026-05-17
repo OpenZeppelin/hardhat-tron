@@ -1,20 +1,19 @@
 //
-// plugin/compile/downloader.js
+// src/compile/downloader.js
 //
 // Fetches a tron-solc wasm and stages it at a predictable cache path.
 // Three things that matter here:
 //
-//   1. SHA-256 integrity verification against the manifest. This is
-//      real cryptographic verification, not LZ's "did the file load
-//      without throwing" check. A corrupt-but-loadable wasm or a MITM
-//      with a malicious wasm that happens to report the right version
-//      string both pass LZ's verify and fail ours. Same threat model
-//      as Hardhat's stock solc downloader.
+//   1. SHA-256 integrity verification against the manifest. Real
+//      cryptographic verification, not just "did the file load
+//      without throwing" -- a corrupt-but-loadable wasm or a MITM
+//      with a malicious wasm that happens to report the right
+//      version string would pass loadability and still be wrong.
+//      Same threat model as Hardhat's stock solc downloader.
 //
 //   2. Per-version Promise dedup. Multiple compiles in the same
 //      process asking for the same version coalesce onto one
-//      download. Different versions proceed independently -- LZ's
-//      coarse global mutex serialised everything.
+//      download; different versions proceed independently.
 //
 //   3. Atomic staging via .tmp + rename. An interrupted download
 //      leaves a .tmp file we delete on the next attempt; the final
