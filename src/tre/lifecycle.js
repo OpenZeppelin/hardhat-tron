@@ -120,6 +120,36 @@ async function waitForReady(url, deadlineMs, log) {
   throw new Error(`TRE did not become ready at ${url} within ${deadlineMs}ms (last: ${lastErr})`);
 }
 
+// After tre_version succeeds the FullNode is up, but the chain only
+// has the genesis block. The first call to `getCurrentBlock` /
+// `getCurrentRefBlockParams` returns undefined until at least one
+// real block exists. Mine one to warm the ref-block cache so the
+// first deploy in any consumer test doesn't error with
+// "Cannot read properties of undefined (reading 'toString')".
+//
+// Uses tre_mine directly (the patched cheatcode); ignores errors so
+// stock tronbox/tre images (without the patched jar) still proceed --
+// they will just take longer to surface a real block via the
+// configured block-time.
+async function warmChain(networkUrl, log) {
+  const treUrl = networkUrl.replace(/\/jsonrpc$/, '/tre');
+  try {
+    const res = await fetch(treUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tre_mine', params: [] }),
+    });
+    const body = await res.json();
+    if (body && body.result !== undefined) {
+      log(`  chain warmed (block #${body.result.blockNumber ?? '?'})`);
+    } else {
+      log(`  tre_mine returned no result (stock image?); chain may take a block-time to warm`);
+    }
+  } catch (e) {
+    log(`  tre_mine warm-up failed (${e.message}); proceeding anyway`);
+  }
+}
+
 // Returns { spawned, name, url }. spawned=false means we re-used an
 // existing reachable container (or a manually-started one).
 async function ensureUp(cfg, networkUrl, log = () => {}) {
@@ -150,6 +180,7 @@ async function ensureUp(cfg, networkUrl, log = () => {}) {
 
   try {
     await waitForReady(networkUrl, cfg.readinessTimeoutMs, log);
+    await warmChain(networkUrl, log);
   } catch (e) {
     // Surface logs from the container to help the user diagnose
     // startup failures before we kill it.
