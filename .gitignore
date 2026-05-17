@@ -1,0 +1,10 @@
+node_modules/
+*.log
+.DS_Store
+.vscode/
+.idea/
+.env
+.env.local
+
+# Built locally by docker/build-jar.sh. ~200 MB; rebuild on demand.
+docker/FullNode.jar
