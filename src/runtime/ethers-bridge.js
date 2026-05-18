@@ -1549,35 +1549,58 @@ function loadArtifact(hre, name) {
   // (`Foo.json`) and `hardhat-exposed`-generated wrappers (`$Foo.json`)
   // live under the same tree because `exposed.outDir =
   // 'contracts/exposed'` in hardhat.config.cjs.
+  //
+  // Optional `hre.config.tre.artifactNameSuffixes` adds a fallback
+  // chain: when bare `Foo` misses, try `Foo<suffix>` for each suffix
+  // (empty string = no-op slot to keep the original-first order). Used
+  // by openzeppelin-contracts-upgradeable-style ports where upstream
+  // tests reference `$ERC20` but the on-disk artifact is
+  // `$ERC20Upgradeable`. Default `['']` = legacy behaviour, no fallback.
   const root = path.join(artifactsDir, 'contracts');
   if (!_artifactIndex) _artifactIndex = _buildArtifactIndex(root);
-  const candidates = _artifactIndex.get(name);
-  if (!candidates || candidates.length === 0) {
-    // Possible cause: artifact written AFTER the index was built (rare
-    // in test flows — compile runs before test). Rebuild once and retry
-    // before giving up.
-    _artifactIndex = _buildArtifactIndex(root);
-    const retry = _artifactIndex.get(name);
-    if (!retry || retry.length === 0) {
-      throw new Error(`Artifact for contract "${name}" not found in ${root}`);
+  const suffixes = (hre.config.tre && hre.config.tre.artifactNameSuffixes) || [''];
+  // Prefix `$` is the hardhat-exposed wrapper marker. When the caller
+  // asks for `$X`, suffix variants must keep the `$` glued to the
+  // contract name (we want `$XUpgradeable`, never `$X + Upgradeable`).
+  // Strip the prefix here so the suffix joins the bare name, then
+  // re-attach.
+  const hasDollar = name.startsWith('$');
+  const core = hasDollar ? name.slice(1) : name;
+  const attach = c => (hasDollar ? '$' : '') + c;
+  for (const sfx of suffixes) {
+    const candidate = attach(core + sfx);
+    const hits = _artifactIndex.get(candidate);
+    if (hits && hits.length === 1) {
+      const a = JSON.parse(fs.readFileSync(hits[0], 'utf8'));
+      _artifactCache.set(name, a);
+      return a;
     }
-    if (retry.length > 1) {
+    if (hits && hits.length > 1) {
       throw new Error(
-        `Multiple artifacts named "${name}" found, please use a fully-qualified name:\n  ${retry.join('\n  ')}`,
+        `Multiple artifacts named "${candidate}" found, please use a fully-qualified name:\n  ${hits.join('\n  ')}`,
       );
     }
-    const a = JSON.parse(fs.readFileSync(retry[0], 'utf8'));
-    _artifactCache.set(name, a);
-    return a;
   }
-  if (candidates.length > 1) {
-    throw new Error(
-      `Multiple artifacts named "${name}" found, please use a fully-qualified name:\n  ${candidates.join('\n  ')}`,
-    );
+  // Possible cause: artifact written AFTER the index was built (rare
+  // in test flows — compile runs before test). Rebuild once and retry
+  // before giving up.
+  _artifactIndex = _buildArtifactIndex(root);
+  for (const sfx of suffixes) {
+    const candidate = attach(core + sfx);
+    const hits = _artifactIndex.get(candidate);
+    if (hits && hits.length === 1) {
+      const a = JSON.parse(fs.readFileSync(hits[0], 'utf8'));
+      _artifactCache.set(name, a);
+      return a;
+    }
+    if (hits && hits.length > 1) {
+      throw new Error(
+        `Multiple artifacts named "${candidate}" found, please use a fully-qualified name:\n  ${hits.join('\n  ')}`,
+      );
+    }
   }
-  const a = JSON.parse(fs.readFileSync(candidates[0], 'utf8'));
-  _artifactCache.set(name, a);
-  return a;
+  const tried = suffixes.map(s => attach(core + s)).join(', ');
+  throw new Error(`Artifact for contract "${name}" not found in ${root} (tried: ${tried})`);
 }
 
 // -- Predict-address cache ---------------------------------------

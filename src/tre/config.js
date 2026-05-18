@@ -13,6 +13,14 @@
 //   tre.keepRunning   boolean   default: false  (skip teardown after the wrapped task)
 //   tre.readinessTimeoutMs  number  default: 60000
 //   tre.startupEnv    object?   additional `-e KEY=value` env vars passed to docker run
+//   tre.artifactNameSuffixes string[]?   optional artifact-name fallback chain.
+//                                        When the bridge looks up a bare name (e.g. `$ERC20`),
+//                                        it tries each suffix in order (`['', 'Upgradeable']`
+//                                        → first `$ERC20`, then `$ERC20Upgradeable`).
+//                                        Mirrors openzeppelin-contracts-upgradeable's
+//                                        env-artifacts.js trick for running unchanged
+//                                        upstream tests against the transpiled tree.
+//                                        Default: `['']` (no fallback).
 //
 // The autoStart wrapper only acts when the configured network has
 // `tron: true` AND nothing is already listening on `network.<n>.url`.
@@ -38,6 +46,7 @@ const DEFAULTS = {
   keepRunning: false,
   readinessTimeoutMs: 60_000,
   startupEnv: {},
+  artifactNameSuffixes: [''],
 };
 
 extendConfig((config, userConfig) => {
