@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# Build artifacts
+artifacts/
+cache/
+typechain-types/
+
+# Coverage
+coverage/
+coverage.json
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Env
+.env
+.env.local
