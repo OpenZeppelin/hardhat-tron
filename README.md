@@ -70,6 +70,39 @@ Each batch entry supports:
 
 The task wipes `paths.artifacts` and `paths.cache` once at the start so the run is reproducible, then mutates `tre.compiler.include` between passes — the source-resolver subtask re-reads this on every invocation, so each compile sees only the current batch's source set.
 
+## Auto-up: TRE lifecycle on `hardhat test`
+
+When a Hardhat network is declared `tron: true` and `tre.autoStart` is left at its default (`true`), `npx hardhat test` spawns a TRE container before tests run and tears it down on exit:
+
+```js
+module.exports = {
+  networks: {
+    tre: {
+      url: 'http://127.0.0.1:9090/jsonrpc',
+      tron: true,
+      accounts: [process.env.TRE_PRIVATE_KEY],
+    },
+  },
+  tre: {
+    image: 'tronbox/tre:dev', // default
+    port: 9090, // default; host side, container exposes 9090
+    jarPath: './tre/FullNode.jar', // optional patched-jar bind mount
+    autoStart: true, // default — master switch
+    autoStartOnTest: true, // default — per-task gate
+    keepRunning: false, // default — set true to skip teardown
+    readinessTimeoutMs: 60_000, // default — wait-for-ready budget
+  },
+};
+```
+
+The lifecycle wrapper skips spawning when:
+
+- `tre.autoStart` is `false`,
+- the selected network does not have `tron: true`, or
+- something is already responding on the network's URL (manual `docker-compose up -d`, a teammate's existing container, or a previous run left up by `keepRunning`).
+
+Teardown is skipped if `keepRunning` is `true` OR if a pre-existing container was reused — the plugin never tears down a container it didn't spawn.
+
 ## Notes
 
 The plugin installs a global HTTP keep-alive agent at module load. This eliminates the per-request TCP handshake overhead on the thousands of `/wallet/*` round-trips a typical test suite makes against the local java-tron container. See [`src/runtime/http-agent.js`](src/runtime/http-agent.js) for the rationale and tuning notes.

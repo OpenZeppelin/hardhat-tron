@@ -18,8 +18,13 @@ require('./tasks/tron-compile-batches');
 // Loaded for the side-effect of `extendConfig`. The lifecycle
 // module itself (`src/tre/lifecycle.js`) is a standalone surface
 // for consumers that want to spawn / tear down a container
-// manually; task wrappers that auto-spawn arrive separately.
+// manually.
 require('./tre/config');
+
+// Auto-spawn a TRE container on `hardhat test` (gated on
+// `tre.autoStart` + a tron-typed network + nothing already
+// listening). Side-effect import — registers the TASK_TEST wrapper.
+require('./tasks/test');
 
 const { extendEnvironment } = require('hardhat/config');
 
