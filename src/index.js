@@ -26,6 +26,10 @@ require('./tre/config');
 // listening). Side-effect import — registers the TASK_TEST wrapper.
 require('./tasks/test');
 
+// Auto-spawn a TRE container on `hardhat compile` when
+// `tre.autoStartOnCompile` is true (opt-in; default false).
+require('./tasks/compile');
+
 const { extendEnvironment } = require('hardhat/config');
 
 const treWeb = require('./runtime/tre-web');
