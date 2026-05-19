@@ -27,6 +27,17 @@ const { ethers: ethersV6 } = require('ethers');
 const { TronWeb } = require('tronweb');
 
 const signersMod = require('./signers');
+const {
+  sendCallTx,
+  sendTransferTx,
+  jsonStringifyWithBigInts,
+  valueToCallValue,
+  impersonateAccount: rpcImpersonateAccount,
+  stopImpersonatingAccount: rpcStopImpersonatingAccount,
+  registerLocalImpersonation,
+  unregisterLocalImpersonation,
+  isLocallyImpersonated,
+} = require('./cheatcodes');
 
 // -- Receipt registry + stub provider --------------------------------
 //
@@ -798,6 +809,85 @@ function coerceForEthers(value, input) {
 // owner_address is on TreImpersonationRegistry and skips ECRecover,
 // accepting the tx despite the signature ECRecovering to the
 // deployer.
+async function sendImpersonatedCall(
+  fnAbi,
+  contractTronBase58,
+  fromTronBase58,
+  normalized,
+  deployerTronWeb,
+  overrides = {},
+) {
+  const { fragment: ifaceFragment, iface } = getFragmentAndIface(fnAbi);
+  const sig = canonicalSig(fnAbi);
+  const calldata = iface.encodeFunctionData(
+    ifaceFragment,
+    normalized.map((v, i) => coerceForEthers(v, fnAbi.inputs[i])),
+  );
+  const parameter = calldata.slice(10);
+
+  // msg.value override. 1 wei == 1 sun pass-through on the JS↔TVM
+  // boundary; see the unit-model comment in cheatcodes.js.
+  let callValueSun = 0;
+  if (overrides.value != null) {
+    callValueSun = valueToCallValue(overrides.value);
+  }
+
+  const base = deployerTronWeb.fullNode.host.replace(/\/$/, '');
+  // `callValueSun` can be a BigInt (anything above 2^53 sun ≈ ~9e15
+  // would lose precision under Number coercion — VestingWallet /
+  // proxy-with-value tests send `parseEther("1") = 1e18` here). Use
+  // the BigInt-safe JSON serializer; java-tron parses `call_value`
+  // as a Long.
+  const triggerResp = await fetch(base + '/wallet/triggersmartcontract', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: jsonStringifyWithBigInts({
+      owner_address: TronWeb.address.toHex(fromTronBase58),
+      contract_address: TronWeb.address.toHex(contractTronBase58),
+      function_selector: sig,
+      parameter,
+      // Default to TRE's 1_000_000_000 sun (≈10M energy @ 100
+      // sun/energy) ceiling. Honor `overrides.feeLimit` (already
+      // mapped from `overrides.gasLimit` by `makeMethod.invoke`)
+      // when supplied so OOG probes actually constrain the budget.
+      fee_limit: overrides.feeLimit != null ? Number(overrides.feeLimit) : 1_000_000_000,
+      call_value: callValueSun,
+      visible: false,
+    }),
+  });
+  const triggerJson = await triggerResp.json();
+  if (!triggerJson.transaction || !triggerJson.result || triggerJson.result.code) {
+    throw new Error(
+      `triggersmartcontract failed (impersonated from ${fromTronBase58}): ` + JSON.stringify(triggerJson),
+    );
+  }
+
+  // TronWeb's `trx.sign` verifies that the private key derives to
+  // the unsigned tx's `owner_address` and throws "Private key does
+  // not match address in transaction" otherwise. For an impersonated
+  // call the owner IS the address we don't hold a key for — that's
+  // the whole point. Passing `multisig: true` (4th arg) bypasses
+  // the owner-key check while keeping the signing primitive intact.
+  // The signature ECRecovers to the deployer; the patched
+  // `TransactionCapsule.validateSignature` accepts that because
+  // owner is on `TreImpersonationRegistry`.
+  const signed = await deployerTronWeb.trx.sign(triggerJson.transaction, undefined, undefined, true);
+  const broadcastResp = await fetch(base + '/wallet/broadcasttransaction', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(signed),
+  });
+  const broadcastJson = await broadcastResp.json();
+  if (!broadcastJson.result) {
+    const code = broadcastJson.code || broadcastJson.message || JSON.stringify(broadcastJson);
+    const hint = /SIGERROR|signature/i.test(String(code))
+      ? ' (impersonation requires the patched TransactionCapsule)'
+      : '';
+    throw new Error(`impersonated broadcast failed: ${code}${hint}`);
+  }
+  return signed.txID || broadcastJson.txid;
+}
+
 async function buildRevertErrorWithSim(txId, info, fnAbi, tronContract, tronWeb, normalized) {
   const err = buildRevertError(txId, info);
   if (err.data && err.data !== '0x') return err;
@@ -853,6 +943,32 @@ function makeMethod(fnAbi, tronContract, tronWeb, hre) {
       overrides.gasLimit != null
         ? Math.max(1, Math.min(1_000_000_000, Number(BigInt(overrides.gasLimit)) * 100))
         : 1_000_000_000;
+    // Impersonated write: route through the raw HTTP path with a
+    // forged `owner_address`. `_impersonatedFrom` is set by
+    // `makeImpersonatingSigner`; for normal signers it's undefined
+    // and we keep the TronWeb-contract `.send()` happy path.
+    if (tronWeb._impersonatedFrom) {
+      const deployerTronWeb = hre.tre.makeTronWeb().tronWeb;
+      const txId = await sendImpersonatedCall(
+        fnAbi,
+        tronContract.address,
+        tronWeb._impersonatedFrom,
+        normalized,
+        deployerTronWeb,
+        { ...overrides, feeLimit: _gasLimitSun },
+      );
+      const info = await hre.tre.waitForReceipt(deployerTronWeb, txId);
+      if (!(info && info.receipt && info.receipt.result === 'SUCCESS')) {
+        throw await buildRevertErrorWithSim(txId, info, fnAbi, tronContract, tronWeb, normalized);
+      }
+      // Outer-call value for chai-matchers' ether-balance accounting.
+      const impCallValueSun = overrides.value != null ? valueToCallValue(overrides.value) : 0;
+      return makeTxResponse(txId, info, tronContract._iface || null, {
+        fromBase58: tronWeb._impersonatedFrom,
+        toBase58: tronContract.address,
+        callValueSun: impCallValueSun,
+      });
+    }
     // feeLimit caps the energy a single tx can buy. TRE's hard
     // ceiling is 1_000_000_000 sun (1000 TRX) — TronWeb's validator
     // rejects anything higher with "feeLimit must be >= 0 and <=
@@ -870,9 +986,44 @@ function makeMethod(fnAbi, tronContract, tronWeb, hre) {
       // converted to strings (Java parses Long natively from quoted
       // ints in this field). Number coercion would lose precision
       // above 2^53 sun.
-      const { valueToCallValue } = require('./cheatcodes');
       const cv = valueToCallValue(overrides.value);
       sendOpts.callValue = typeof cv === 'bigint' ? cv.toString() : cv;
+    }
+
+    // TronWeb's contract proxy can't encode tuple-typed args reliably
+    // — its bundled ethers AbiCoder chokes on the struct object even
+    // when nested addresses are hex-formatted, throwing "cannot
+    // encode object for signature with missing names". Workaround:
+    // ethers-encode the calldata ourselves and broadcast through the
+    // same raw HTTP path the impersonation case uses. `multisig:
+    // false` keeps TronWeb's owner-key check active — the current
+    // signer's TronWeb HAS the matching private key, so it signs
+    // normally.
+    const hasTupleInput = fnAbi.inputs.some((i) => i && (i.type === 'tuple' || /^tuple\[/.test(i.type)));
+    if (hasTupleInput) {
+      const { fragment: ifaceFragment, iface } = getFragmentAndIface(fnAbi);
+      const calldata = iface.encodeFunctionData(
+        ifaceFragment,
+        normalized.map((v, i) => coerceForEthers(v, fnAbi.inputs[i])),
+      );
+      const fromBase58 = tronWeb.defaultAddress && tronWeb.defaultAddress.base58;
+      const txId = await sendCallTx(tronWeb, {
+        fromBase58,
+        toBase58: tronContract.address,
+        data: calldata,
+        value: overrides.value != null ? overrides.value : 0n,
+        multisig: false,
+        feeLimit: _gasLimitSun,
+      });
+      const info = await hre.tre.waitForReceipt(tronWeb, txId);
+      if (!(info && info.receipt && info.receipt.result === 'SUCCESS')) {
+        throw await buildRevertErrorWithSim(txId, info, fnAbi, tronContract, tronWeb, normalized);
+      }
+      return makeTxResponse(txId, info, tronContract._iface || null, {
+        fromBase58,
+        toBase58: tronContract.address,
+        callValueSun: sendOpts.callValue || 0,
+      });
     }
 
     let txId;
@@ -1567,6 +1718,115 @@ function makeFactory(hre, name, boundSigner = null) {
   };
 }
 
+// -- Signers -------------------------------------------------------
+
+// Materialize (or return cached) the bridge's signer set. Hands the
+// signers module the bridge-side deps it needs to integrate cleanly:
+// the receipts cache so `signer.sendTransaction` results are
+// resolvable by `provider.getTransactionReceipt`, and the receipt
+// poller so the call path can wait for confirmation.
+async function makeSigners(hre) {
+  const signers = await signersMod.buildSigners(hre, {
+    knownReceipts,
+    waitForReceipt: hre.tre.waitForReceipt,
+  });
+  // Attach the stub provider for `signer.provider` access (some chai
+  // matchers reach into it).
+  return signers.map((s) => Object.assign(s, { provider: stubProvider }));
+}
+
+// Pseudo-signer for an impersonated address. Carries the deployer's
+// TronWeb (we don't have the impersonated key) tagged with
+// `_impersonatedFrom` so `makeMethod` routes writes through the
+// raw-HTTP path with a forged `owner_address`. Compatible with
+// `contract.connect(signer)` and the `getSigner(address)` flow.
+//
+// `signMessage` / `signTypedData` are deliberately omitted —
+// impersonation is for `msg.sender`-driven flows, not off-chain
+// signature flows.
+function makeImpersonatingSigner(hre, address) {
+  const base58 = signersMod.toBase58(address);
+  const hex21 = TronWeb.address.toHex(base58);
+  const checksum = ethersV6.getAddress('0x' + hex21.slice(2));
+  const deployerTronWeb = hre.tre.makeTronWeb().tronWeb;
+  // Prototype-clone the deployer's TronWeb so all methods and state
+  // (defaultAddress, privateKey, fullNode) are inherited unchanged
+  // and only the impersonation tag lives on our local object.
+  // Mutating `_impersonatedFrom` directly on the deployer instance
+  // would leak across signers.
+  const tronWeb = Object.create(deployerTronWeb);
+  tronWeb._impersonatedFrom = base58;
+
+  const signer = {
+    address: checksum,
+    tronAddress: base58,
+    tronWeb,
+    provider: stubProvider,
+    _impersonated: true,
+    getAddress: async () => checksum,
+    connect() {
+      return signer;
+    },
+    async sendTransaction({ to, data, value } = {}) {
+      const toBase58 = signersMod.toBase58(to);
+      // Any `data` field (including '0x') → TriggerSmartContract;
+      // `data === undefined` → plain TRX transfer. `multisig: true`
+      // bypasses TronWeb's owner-key check; the patched fork accepts
+      // the forged owner via the impersonation registry bypass.
+      const hasDataField = typeof data === 'string';
+      let txId;
+      if (hasDataField) {
+        txId = await sendCallTx(deployerTronWeb, {
+          fromBase58: base58,
+          toBase58,
+          data,
+          value,
+          multisig: true,
+        });
+      } else {
+        txId = await sendTransferTx(deployerTronWeb, {
+          fromBase58: base58,
+          toBase58,
+          value,
+          multisig: true,
+        });
+      }
+      const info = hasDataField ? await hre.tre.waitForReceipt(deployerTronWeb, txId) : null;
+      const succeeded = hasDataField ? info && info.receipt && info.receipt.result === 'SUCCESS' : true;
+      const callValueSun = valueToCallValue(value);
+      const energyFee =
+        info && info.receipt && Number.isFinite(info.receipt.energy_fee) ? Number(info.receipt.energy_fee) : 0;
+      const netFee = info && info.receipt && Number.isFinite(info.receipt.net_fee) ? Number(info.receipt.net_fee) : 0;
+      const totalFeeSun = (info && info.fee) || energyFee + netFee;
+      const receipt = {
+        hash: '0x' + txId,
+        transactionHash: '0x' + txId,
+        status: succeeded ? 1 : 0,
+        blockNumber: info ? info.blockNumber : undefined,
+        logs: [],
+        feeSun: totalFeeSun,
+        internalTransactions: (info && info.internal_transactions) || [],
+      };
+      rememberReceipt(receipt.hash, receipt);
+      if (hasDataField && !receipt.status) {
+        throw buildRevertError(txId, info);
+      }
+      return {
+        hash: receipt.hash,
+        transactionHash: receipt.hash,
+        blockNumber: receipt.blockNumber,
+        from: tronToHex(base58),
+        to: tronToHex(toBase58),
+        valueSun: callValueSun,
+        feeSun: totalFeeSun,
+        internalTransactions: receipt.internalTransactions,
+        wait: async () => receipt,
+      };
+    },
+  };
+  return signer;
+}
+
 extendEnvironment((hre) => {
   if (!(hre.network && hre.network.config && hre.network.config.tron)) return;
   // Give the stubProvider a handle to hre so its lazy methods
@@ -1590,6 +1850,52 @@ extendEnvironment((hre) => {
     }
     return deployViaFacade(hre, name, args, signerOrOpts);
   };
+  hre.ethers.getContractFactory = (name) => Promise.resolve(makeFactory(hre, name));
+  hre.ethers.getContractAt = (name, address) => {
+    const artifact = loadArtifact(hre, name);
+    const { tronWeb } = hre.tre.makeTronWeb();
+    return Promise.resolve(makeFacade(artifact.abi, toTronBase58(address), tronWeb, hre));
+  };
+  hre.ethers.getSigners = () => makeSigners(hre);
+
+  // Singular `getSigner(addr)`. A real derived signer is returned
+  // when the address matches; otherwise an impersonating signer is
+  // returned. The tx broadcast path still needs the patched
+  // FullNode to whitelist `owner_address` (via `tre_impersonate
+  // Account`), so callers that forget to register get a clear
+  // "owner_address not impersonated" rejection from the chain
+  // instead of a silent fallback to the deployer key.
+  hre.ethers.getSigner = async (address) => {
+    const base58 = signersMod.toBase58(address);
+    const real = await makeSigners(hre);
+    const match = real.find((s) => s.tronAddress === base58);
+    if (match) return match;
+    return makeImpersonatingSigner(hre, base58);
+  };
+
+  // CREATE2 on TVM uses
+  // `keccak256(0x41 || sender || salt || initHash)[12:]` — verified
+  // against on-chain deploys, and the in-tree CREATE2 libraries are
+  // patched to hash with the `0x41` prefix as well. This override
+  // is the matching half for those contract-side patches: every
+  // test that compares an off-chain prediction against
+  // `factory.$computeAddress(...)` /
+  // `factory.predictDeterministicAddress(...)` would otherwise see
+  // EVM-formula (0xff) on the JS side vs TVM-formula (0x41) in the
+  // contract. Without it the CREATE2 suites all fail with
+  // prefix-byte address mismatches.
+  hre.ethers.getCreate2Address = (from, salt, initCodeHash) => {
+    const fromHex = ethersV6.getAddress(asAddressString(from));
+    const concat = ethersV6.concat(['0x41', fromHex, salt, initCodeHash]);
+    return ethersV6.getAddress(ethersV6.dataSlice(ethersV6.keccak256(concat), 12));
+  };
+
+  // Replace `hre.ethers.provider` with the stub. hardhat-ethers's
+  // provider points at the EVM JSON-RPC, which our java-tron
+  // FullNode doesn't fully serve; the stub forwards reads to
+  // TronWeb and keeps `getTransactionReceipt` resolving against the
+  // bridge's cache.
+  hre.ethers.provider = stubProvider;
 
   // Chai matchers' `reverted` matcher hits
   // `hre.ethers.provider.getTransactionReceipt` directly. Wire that
@@ -1615,9 +1921,35 @@ extendEnvironment((hre) => {
 });
 
 module.exports = {
+  // Construction + dispatch primitives. Surfaced for tests and
+  // other plugin modules that want a facade or factory without
+  // going through `hre.ethers`.
+  makeFacade,
+  makeFactory,
+  deployViaFacade,
+  makeSigners,
+
   // Surfaced for `src/runtime/deploy.js` so its constructor-revert
   // path can throw an ethers-shaped error with `.data` for chai
   // matchers' `revertedWithCustomError`. Lazy-required from deploy.js
   // to break a load-order cycle with the bridge.
   buildRevertError,
+
+  // Address utilities. Tests use these to convert between TRON
+  // base58 and ethers checksummed hex without importing TronWeb
+  // directly.
+  tronToHex,
+  toTronBase58,
+
+  // Pre-build cache surfaced so signers' `predictAddress` can stash
+  // a pre-signed `CreateSmartContract` tx that the next
+  // `ethers.deployContract(name, args, signer)` call broadcasts
+  // verbatim. Lazy-required from signers.js to avoid the
+  // bridge ↔ signers module-load cycle.
+  _prebuildCache,
+  prebuildCacheKey,
+
+  // Artifact + arg helpers surfaced for signers' `predictAddress`.
+  loadArtifact,
+  normalizeArg,
 };
