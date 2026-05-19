@@ -30,6 +30,11 @@ require('./tasks/test');
 // `tre.autoStartOnCompile` is true (opt-in; default false).
 require('./tasks/compile');
 
+// Auto-spawn a TRE container on `hardhat node`. Default-on via
+// `tre.autoStartOnNode`. Does not tear down — `node` is
+// long-running, the user manages cleanup with `docker rm -f`.
+require('./tasks/node');
+
 const { extendEnvironment } = require('hardhat/config');
 
 const treWeb = require('./runtime/tre-web');
