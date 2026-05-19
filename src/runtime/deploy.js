@@ -147,7 +147,12 @@ async function pollDeployReceipt(tronWeb, txId, opts = {}) {
       if (result === 'SUCCESS' || !result) {
         return { address: info.contract_address, txId, info };
       }
-      throw new Error(`deploy reverted (${result}) tx ${txId}: ${JSON.stringify(info)}`);
+      // Lazy-require the bridge to avoid the bridge ↔ deploy.js
+      // module-load cycle; the bridge's `buildRevertError` wraps the
+      // raw `info` in an ethers-shaped Error with `.data` so chai
+      // matchers' `revertedWithCustomError` can decode it.
+      const { buildRevertError } = require('./ethers-bridge');
+      throw buildRevertError(txId, info);
     }
     if (iter && iter % 5 === 0) await mine(tronWeb).catch(() => {});
     iter++;
