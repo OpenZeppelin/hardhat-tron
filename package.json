@@ -4,6 +4,7 @@
   "description": "Hardhat plugin for compiling and deploying Solidity contracts to TRON TVM.",
   "license": "MIT",
   "main": "src/index.js",
+  "types": "src/types.d.ts",
   "exports": {
     ".": "./src/index.js",
     "./cheatcodes": "./src/runtime/cheatcodes.js",
