@@ -14,6 +14,13 @@ require('./compile');
 // registering the task; only runs when the user invokes it.
 require('./tasks/tron-compile-batches');
 
+// TRE lifecycle config (`tre.image`, `tre.port`, `tre.jarPath`, …).
+// Loaded for the side-effect of `extendConfig`. The lifecycle
+// module itself (`src/tre/lifecycle.js`) is a standalone surface
+// for consumers that want to spawn / tear down a container
+// manually; task wrappers that auto-spawn arrive separately.
+require('./tre/config');
+
 const { extendEnvironment } = require('hardhat/config');
 
 const treWeb = require('./runtime/tre-web');
