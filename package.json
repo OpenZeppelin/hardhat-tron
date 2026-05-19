@@ -6,7 +6,8 @@
   "main": "src/index.js",
   "exports": {
     ".": "./src/index.js",
-    "./cheatcodes": "./src/runtime/cheatcodes.js"
+    "./cheatcodes": "./src/runtime/cheatcodes.js",
+    "./signers": "./src/runtime/signers.js"
   },
   "files": [
     "src",
