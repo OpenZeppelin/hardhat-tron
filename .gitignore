@@ -22,3 +22,8 @@ npm-debug.log*
 # Env
 .env
 .env.local
+
+# Patched FullNode.jar — output of `docker/build-jar.sh`. The Java
+# sources live under `docker/src/`; the compiled jar is reproducible
+# from them and not committed.
+tre/FullNode.jar
