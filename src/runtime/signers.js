@@ -15,9 +15,9 @@
 // that use `ECDSA.recover` (e.g. `ERC20Permit`, `ERC2771Forwarder`)
 // accept these signatures unchanged.
 //
-// State-changing call paths (`sendTransaction`, contract-factory
-// binding via `connect`) layer on top of the ethers bridge and land
-// in its module.
+// State-changing call paths (`sendTransaction`, `predictAddress`)
+// route through the ethers bridge's raw-HTTP helpers; the bridge is
+// lazy-required inside each method to break a load-order cycle.
 
 const { ethers: ethersV6 } = require('ethers');
 const { TronWeb } = require('tronweb');
@@ -69,12 +69,160 @@ function buildTronWeb(hre, privateKey) {
 // methods OZ tests reach for. The `tronWeb` field is the per-signer
 // client; the bridge later wires `factory.connect(signer)` to route
 // writes through it so transactions sign with this signer's key.
-function makeSigner(hre, privateKey) {
+//
+// `deps.knownReceipts` and `deps.waitForReceipt` are supplied by the
+// bridge when it materializes the signer set for `getSigners()`;
+// they're consumed by `sendTransaction` to register the receipt with
+// the bridge's cache. When the signer is built standalone (e.g. for
+// the funding/`refundSigners` paths) those calls aren't used, so the
+// missing deps don't matter.
+function makeSigner(hre, privateKey, deps = {}) {
   const { tronAddress, address } = addressesFromKey(privateKey);
   const tronWeb = buildTronWeb(hre, privateKey);
   // `ethers.Wallet` for offline signing — the key material is what
   // matters; the wallet is never connected to a provider.
   const wallet = new ethersV6.Wallet(privateKey);
+
+  // Three modes for `sendTransaction({to, value, data})`:
+  //   1. `data` non-empty → contract call (sendCallTx via
+  //      `/wallet/triggersmartcontract`; signs with this signer's
+  //      key). Used by tests that send arbitrary calldata without
+  //      going through the contract proxy.
+  //   2. `data` empty + `value` > 0 → plain TRX transfer
+  //      (`tronWeb.trx.sendTransaction`).
+  //   3. Degenerate (no data + zero/no value) → throw, since neither
+  //      TVM endpoint accepts an amount=0 transfer.
+  async function sendTransaction({ to, value, data } = {}) {
+    const { sendCallTx, valueToCallValue } = require('./cheatcodes');
+    const recipientBase58 = toBase58(to);
+    const hasDataField = typeof data === 'string';
+
+    let txId;
+    if (hasDataField) {
+      txId = await sendCallTx(tronWeb, {
+        fromBase58: tronAddress,
+        toBase58: recipientBase58,
+        data,
+        value,
+      });
+    } else {
+      const amount = valueToCallValue(value);
+      if (amount <= 0) {
+        throw new Error(
+          'sendTransaction({to, value, data}) requires either a `data` field or a positive `value`. ' +
+            'TVM rejects amount=0 plain transfers.',
+        );
+      }
+      const sent = await tronWeb.trx.sendTransaction(recipientBase58, amount);
+      if (!sent.result) {
+        throw new Error(`sendTransaction failed: ${JSON.stringify(sent)}`);
+      }
+      txId = sent.txid || (sent.transaction && sent.transaction.txID);
+    }
+
+    // Plain TransferContract txs don't surface an `info.receipt`
+    // object (the receipt field is a contract-execution shape), so
+    // polling for it would time out. Skip the poll for transfers and
+    // synthesize an empty info; the call path still polls because it
+    // needs `receipt.result` / logs.
+    const waitForReceipt = deps.waitForReceipt || (hre.tre && hre.tre.waitForReceipt);
+    const info = hasDataField && waitForReceipt ? await waitForReceipt(tronWeb, txId) : null;
+    // Receipt-result semantics differ between TransferContract (plain
+    // TRX) and TriggerSmartContract (any `data` field, even '0x'):
+    // only the latter populates `info.receipt.result`. Falling back
+    // to status:0 would falsely flag every transfer as a revert;
+    // gate the revert check on `hasDataField`.
+    const succeeded = hasDataField ? info && info.receipt && info.receipt.result === 'SUCCESS' : true;
+    const callValueSun = valueToCallValue(value);
+    const feeSun = (info && info.fee) || 0;
+    const energyFee =
+      info && info.receipt && Number.isFinite(info.receipt.energy_fee) ? Number(info.receipt.energy_fee) : 0;
+    const netFee = info && info.receipt && Number.isFinite(info.receipt.net_fee) ? Number(info.receipt.net_fee) : 0;
+    const totalFeeSun = feeSun || energyFee + netFee;
+    const receipt = {
+      hash: '0x' + txId,
+      transactionHash: '0x' + txId,
+      status: succeeded ? 1 : 0,
+      blockNumber: info ? info.blockNumber : undefined,
+      logs: [],
+      feeSun: totalFeeSun,
+      internalTransactions: (info && info.internal_transactions) || [],
+    };
+    if (deps.knownReceipts) deps.knownReceipts.set(receipt.hash, receipt);
+    if (hasDataField && !receipt.status) {
+      // Lazy-require to break the bridge ↔ signers module-load cycle.
+      const { buildRevertError } = require('./ethers-bridge');
+      throw buildRevertError(txId, info);
+    }
+    const { tronToHex } = require('./ethers-bridge');
+    return {
+      hash: receipt.hash,
+      transactionHash: receipt.hash,
+      blockNumber: receipt.blockNumber,
+      from: tronToHex(tronAddress),
+      to: tronToHex(recipientBase58),
+      valueSun: callValueSun,
+      feeSun: totalFeeSun,
+      internalTransactions: receipt.internalTransactions,
+      wait: async () => receipt,
+    };
+  }
+
+  // Pre-compute and stash a `CreateSmartContract` tx for a future
+  // `ethers.deployContract(name, args, this)` call. Returns the
+  // checksummed EVM-style hex address the deploy WILL land at,
+  // computed locally by TronWeb as
+  // `0x41 || keccak256(txID || ownerAddress)[12:]` (identical to the
+  // formula `WalletUtil.generateContractAddress` uses node-side).
+  //
+  // Use case: pre-compute a contract's address to pass it as an
+  // immutable constructor arg into ANOTHER contract. The
+  // ethers-EVM equivalent (`getCreateAddress({from, nonce})`) is
+  // broken on TVM — both the formula differs and `nonce` is
+  // meaningless. This method is the TVM-correct equivalent.
+  async function predictAddress(name, args = [], opts = {}) {
+    const bridge = require('./ethers-bridge');
+    const deploy = require('./deploy');
+    const artifact = bridge.loadArtifact(opts.hre || global.hre || require('hardhat'), name);
+    const ctor = artifact.abi.find((a) => a.type === 'constructor');
+    const ctorInputCount = ctor ? ctor.inputs.length : 0;
+
+    // Mirror the bridge's overrides-splitting so the cache key and
+    // the eventual broadcast see the same ctor-arg shape.
+    const trailing = args[args.length - 1];
+    const overrideKeys = ['value', 'gasLimit', 'gasPrice', 'nonce', 'from', 'maxFeePerGas', 'maxPriorityFeePerGas'];
+    const hasOverrides =
+      trailing &&
+      typeof trailing === 'object' &&
+      !Array.isArray(trailing) &&
+      overrideKeys.some((k) => k in trailing) &&
+      args.length > ctorInputCount;
+    const overrides = hasOverrides ? trailing : {};
+    const ctorArgs = hasOverrides ? args.slice(0, -1) : args;
+
+    let parameters;
+    if (ctorArgs.length > 0 && ctor) {
+      parameters = ctor.inputs.map((input, i) => bridge.normalizeArg(ctorArgs[i], input));
+    }
+
+    const deployOpts = { parameters };
+    if (overrides.value != null) {
+      const { valueToCallValue } = require('./cheatcodes');
+      const cv = valueToCallValue(overrides.value);
+      deployOpts.callValue = typeof cv === 'bigint' ? cv.toString() : cv;
+    }
+    if (overrides.gasLimit != null) {
+      deployOpts.feeLimit = Math.max(1, Math.min(1_000_000_000, Number(BigInt(overrides.gasLimit)) * 100));
+    }
+
+    const { signedTx, predictedAddressTron } = await deploy.prebuildDeploy(tronWeb, tronAddress, artifact, deployOpts);
+    bridge._prebuildCache.set(bridge.prebuildCacheKey(tronAddress, name, args), { signedTx });
+    // TVM stores `contract_address` as `0x41 + 20 hex`. Strip the
+    // prefix and EIP-55 checksum so it compares cleanly against
+    // ethers' equally-checksummed read paths.
+    const hex20 = predictedAddressTron.startsWith('41') ? predictedAddressTron.slice(2) : predictedAddressTron;
+    return ethersV6.getAddress('0x' + hex20);
+  }
 
   const signer = {
     address,
@@ -87,6 +235,8 @@ function makeSigner(hre, privateKey) {
     provider: null,
 
     getAddress: async () => address,
+    sendTransaction,
+    predictAddress,
 
     // EIP-191 personal_sign. TVM's "Tron Signed Message:" prefix is
     // NOT used here — contracts that verify off-chain signatures use
@@ -134,7 +284,7 @@ function toBase58(value) {
 // the start of every fresh fixture; in parallel that's a single
 // ~10–15 ms wave. The HTTP keep-alive agent caps `maxSockets` at 50
 // so 10 concurrent requests share the same warm connection pool.
-async function buildSigners(hre) {
+async function buildSigners(hre, deps = {}) {
   if (_cachedSigners) return _cachedSigners;
 
   const { setAccountBalance } = require('./cheatcodes');
@@ -152,7 +302,7 @@ async function buildSigners(hre) {
     } else {
       pk = deriveKey(i).privateKey;
     }
-    signers.push(makeSigner(hre, pk));
+    signers.push(makeSigner(hre, pk, deps));
   }
 
   // Fund every signer to `DEFAULT_BALANCE_SUN` (including index 0).

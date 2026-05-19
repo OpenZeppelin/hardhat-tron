@@ -13,6 +13,11 @@ const deploy = require('./runtime/deploy');
 const wait = require('./runtime/wait');
 const artifacts = require('./runtime/artifacts');
 
+// Side-effect import: registers an `extendEnvironment` hook that
+// overrides `hre.ethers.deployContract` so unmodified ethers-based
+// tests can deploy through TronWeb.
+require('./runtime/ethers-bridge');
+
 extendEnvironment((hre) => {
   hre.tre = hre.tre || {};
   Object.assign(hre.tre, {
