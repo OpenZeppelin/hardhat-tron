@@ -1,0 +1,45 @@
+{
+  "name": "@openzeppelin/hardhat-tron",
+  "version": "0.0.0",
+  "description": "Hardhat plugin for compiling and deploying Solidity contracts to TRON TVM.",
+  "license": "MIT",
+  "main": "src/index.js",
+  "files": [
+    "src",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "ethers": "^6.13.0",
+    "hardhat": "^2.22.0"
+  },
+  "devDependencies": {
+    "prettier": "^3.3.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OpenZeppelin/hardhat-tron.git"
+  },
+  "bugs": {
+    "url": "https://github.com/OpenZeppelin/hardhat-tron/issues"
+  },
+  "homepage": "https://github.com/OpenZeppelin/hardhat-tron#readme",
+  "keywords": [
+    "ethereum",
+    "tron",
+    "tvm",
+    "smart-contracts",
+    "hardhat",
+    "hardhat-plugin"
+  ]
+}
