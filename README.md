@@ -98,10 +98,25 @@ module.exports = {
 The lifecycle wrapper skips spawning when:
 
 - `tre.autoStart` is `false`,
+- the per-task gate is `false` (`autoStartOnTest` / `autoStartOnCompile` / `autoStartOnNode`),
 - the selected network does not have `tron: true`, or
 - something is already responding on the network's URL (manual `docker-compose up -d`, a teammate's existing container, or a previous run left up by `keepRunning`).
 
 Teardown is skipped if `keepRunning` is `true` OR if a pre-existing container was reused — the plugin never tears down a container it didn't spawn.
+
+### Per-task gates
+
+The three Hardhat tasks the plugin can auto-spawn for behave slightly differently:
+
+| Task              | Gate                 | Default | Teardown                                           |
+| ----------------- | -------------------- | ------- | -------------------------------------------------- |
+| `hardhat test`    | `autoStartOnTest`    | `true`  | Yes (unless `keepRunning`)                         |
+| `hardhat compile` | `autoStartOnCompile` | `false` | Yes (unless `keepRunning`)                         |
+| `hardhat node`    | `autoStartOnNode`    | `true`  | **No** — `node` is long-running; user owns cleanup |
+
+`hardhat compile` is opt-in because `tron-solc` compiles wasm-locally and the compile pipeline itself doesn't need a running container; spinning a 1–2 GB Java container for a 30-second compile is rarely the right trade. Flip the gate on if your task graph initialises the network connection at compile time (some plugins probe `chainId`, perform network-typed config validation, etc.).
+
+`hardhat node` never auto-tears-down — the container has to outlive the `node` process for the dev RPC to be useful. Clean up with `docker rm -f <container-name>`; the wrapper logs the name on spawn so it's one copy-paste away.
 
 ## Notes
 
