@@ -9,6 +9,9 @@ const { extendEnvironment } = require('hardhat/config');
 
 const treWeb = require('./runtime/tre-web');
 const cheatcodes = require('./runtime/cheatcodes');
+const deploy = require('./runtime/deploy');
+const wait = require('./runtime/wait');
+const artifacts = require('./runtime/artifacts');
 
 extendEnvironment((hre) => {
   hre.tre = hre.tre || {};
@@ -19,5 +22,10 @@ extendEnvironment((hre) => {
     setBlockTime: cheatcodes.setBlockTime,
     snapshot: cheatcodes.snapshot,
     revert: cheatcodes.revert,
+    deployContract: deploy.deployContract,
+    prebuildDeploy: deploy.prebuildDeploy,
+    submitPrebuilt: deploy.submitPrebuilt,
+    waitForReceipt: wait.waitForReceipt,
+    loadArtifact: artifacts.loadArtifact,
   });
 });
