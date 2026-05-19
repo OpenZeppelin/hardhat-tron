@@ -26,6 +26,8 @@
     "hardhat": "^2.22.0"
   },
   "dependencies": {
+    "micromatch": "^4.0.8",
+    "solc": "^0.8.26",
     "tronweb": "^6.2.2"
   },
   "devDependencies": {

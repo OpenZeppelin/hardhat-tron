@@ -5,6 +5,15 @@
 // time and won't pick up a `globalAgent` change after the fact.
 require('./runtime/http-agent');
 
+// Compile pipeline (extendConfig + subtask hooks). Loaded for its
+// side-effects — registers `tre.compiler.*` config and the
+// tron-solc compile subtasks.
+require('./compile');
+
+// `tron:compile-batches` task. Loaded for its side-effect of
+// registering the task; only runs when the user invokes it.
+require('./tasks/tron-compile-batches');
+
 const { extendEnvironment } = require('hardhat/config');
 
 const treWeb = require('./runtime/tre-web');
