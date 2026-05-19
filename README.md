@@ -8,6 +8,16 @@ Hardhat plugin for compiling and deploying Solidity contracts to the TRON Virtua
 
 The plugin installs a global HTTP keep-alive agent at module load. This eliminates the per-request TCP handshake overhead on the thousands of `/wallet/*` round-trips a typical test suite makes against the local java-tron container. See [`src/runtime/http-agent.js`](src/runtime/http-agent.js) for the rationale and tuning notes.
 
+## Patched FullNode.jar
+
+The cheatcodes that mutate VM state — `setAccountBalance`, `setAccountCode`, `setAccountStorageAt`, `unlockAccounts`, `snapshot`, `revert` — call `tre_*` JSON-RPC methods that stock java-tron does not implement. They live on a custom `/tre` endpoint served by a patched `FullNode.jar` built from a minor java-tron fork. Each call returns `{ supported, ... }`, so tests can degrade cleanly when running against a stock node. A build pipeline for the patched jar lands later in the rollout.
+
+## Signer rebalancing between test files
+
+Tests draw from a pool of 10 deterministically-derived signers (Hardhat's well-known `test test test … junk` mnemonic, HD path `m/44'/60'/0'/0/i`). The deployer is index 0; the remaining nine are funded at first use via `tre_setAccountBalance` — a direct `AccountStore` write that sidesteps the witness budget capping the docker-compose pre-funding.
+
+Long test runs spend down those balances. The `@openzeppelin/hardhat-tron/signers` subpath exposes `refundSigners(hre)`, which resets every cached signer back to its initial balance. Hooking it into a Mocha `afterEach` in test helpers keeps later files from inheriting depleted state from earlier ones. The call is idempotent (`tre_setAccountBalance` is a direct write, not a transfer) and parallelized — typical cost is one ~15 ms round-trip per fixture.
+
 ## License
 
 [MIT](LICENSE)
