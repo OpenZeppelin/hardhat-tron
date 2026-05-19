@@ -10,6 +10,10 @@ require('./runtime/http-agent');
 // tron-solc compile subtasks.
 require('./compile');
 
+// `tron:compile-batches` task. Loaded for its side-effect of
+// registering the task; only runs when the user invokes it.
+require('./tasks/tron-compile-batches');
+
 const { extendEnvironment } = require('hardhat/config');
 
 const treWeb = require('./runtime/tre-web');
