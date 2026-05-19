@@ -27,7 +27,9 @@ const { ethers: ethersV6 } = require('ethers');
 const { TronWeb } = require('tronweb');
 
 const signersMod = require('./signers');
+const time = require('./time');
 const {
+  rpcCall,
   sendCallTx,
   sendTransferTx,
   jsonStringifyWithBigInts,
@@ -1827,11 +1829,319 @@ function makeImpersonatingSigner(hre, address) {
   return signer;
 }
 
+// -- Snapshot + loadFixture --------------------------------------
+
+// Probed once: does the running container support `tre_snapshot` /
+// `tre_revert`? The patched fork advertises itself via the
+// `tre_version` suffix `oz-tron`. Cached for the lifetime of the
+// test process.
+let _snapshotSupported = null;
+async function _supportsSnapshot(tronWeb) {
+  if (_snapshotSupported !== null) return _snapshotSupported;
+  const v = await rpcCall(tronWeb, 'tre_version', []).catch(() => null);
+  _snapshotSupported = !!(v && v.result && /oz-tron/.test(v.result));
+  return _snapshotSupported;
+}
+
+// `SnapshotRestorer` — analogue of `hardhat-network-helpers`'
+// `SnapshotRestorer`. `restore()` reverts to the snapshot AND
+// immediately re-snapshots so the restorer stays reusable; the
+// public `snapshotId` is the live id (used for the chronological
+// comparison in `loadFixture`).
+function _makeRestorer(tronWeb, initialId) {
+  let snapshotId = initialId;
+  return {
+    get snapshotId() {
+      return snapshotId;
+    },
+    async restore() {
+      const rev = await rpcCall(tronWeb, 'tre_revert', [snapshotId]);
+      if (rev.error) {
+        throw new Error(`tre_revert failed: ${JSON.stringify(rev.error)}`);
+      }
+      const snap = await rpcCall(tronWeb, 'tre_snapshot', []);
+      if (snap.error) {
+        throw new Error(`tre_snapshot failed: ${JSON.stringify(snap.error)}`);
+      }
+      snapshotId = snap.result;
+    },
+  };
+}
+
+async function _takeSnapshot(tronWeb) {
+  const snap = await rpcCall(tronWeb, 'tre_snapshot', []);
+  if (snap.error) {
+    throw new Error(`tre_snapshot failed: ${JSON.stringify(snap.error)}`);
+  }
+  return _makeRestorer(tronWeb, snap.result);
+}
+
+let _fixtureSnapshots = [];
+
+async function loadFixture(fn) {
+  if (typeof fn !== 'function' || fn.name === '') {
+    // Anonymous fixtures resolve to a fresh function reference per
+    // test, so the cache lookup always misses and the deploy fires
+    // every time. Reject loudly so the user names the fixture.
+    throw new Error(
+      'loadFixture: anonymous fixtures are not supported. Pass a named function ' +
+        '(e.g. `async function myFixture() { … }`) so the cache can key on its reference.',
+    );
+  }
+  const hre = require('hardhat');
+  const { tronWeb } = hre.tre.makeTronWeb();
+  // Pre-fund derived signers BEFORE any snapshot is taken. Without
+  // this, the first fixture that doesn't itself call `getSigners()`
+  // captures a snapshot of the unfunded state; later fixtures that
+  // DO call `getSigners()` add the funding, and reverting to the
+  // earlier snapshot strips that funding (the patched FullNode's
+  // `restoreStore` deletes keys not present in the snapshot, which
+  // includes any `AccountStore` entries created by
+  // `tre_setAccountBalance`). Symptom: "Contract validate error:
+  // account [T…] does not exist" when a test routes a tx through
+  // one of the derived signers. Idempotent — `buildSigners` caches
+  // the array.
+  await makeSigners(hre);
+  if (!(await _supportsSnapshot(tronWeb))) {
+    return fn();
+  }
+
+  const snapshot = _fixtureSnapshots.find((s) => s.fixture === fn);
+  if (snapshot === undefined) {
+    // Fresh fixture: re-fund all signers to their full
+    // `DEFAULT_BALANCE_SUN` before `fn()` runs and the snapshot is
+    // taken. Without this, a previous test file's spending leaves
+    // the deployer's balance well below what a Governor / metatx
+    // fixture expects, and the fixture errors with
+    // "balance is not sufficient" when it sends e.g. `parseEther("1")`
+    // to the contract under test. `tre_setAccountBalance` is
+    // idempotent (direct state mutation, not a transfer), so
+    // re-funding has no side effects on chain history.
+    await signersMod.refundSigners(hre);
+  }
+  if (snapshot !== undefined) {
+    // Capture the snapshot id BEFORE `restore()` — `restore()`
+    // reverts to it and then takes a fresh snapshot, overwriting
+    // `restorer.snapshotId` with the NEW (higher) id. Newer
+    // snapshots in the array were taken between this fixture's
+    // last restore and now; the server-side `revert()` walked the
+    // LinkedHashMap newest-first and dropped everything from
+    // `oldId` onwards, so every `_fixtureSnapshots` entry with
+    // `id > oldId` now references a server snapshot that no longer
+    // exists. Without this eviction, the next `loadFixture` for
+    // one of those evicted fixtures hits `tre_revert(unknown_id)`
+    // and the whole describe-block "before each" hook errors out.
+    const oldId = Number(snapshot.restorer.snapshotId);
+    await snapshot.restorer.restore();
+    const evicted = _fixtureSnapshots.filter((s) => s !== snapshot && Number(s.restorer.snapshotId) > oldId);
+    _fixtureSnapshots = _fixtureSnapshots.filter((s) => s === snapshot || Number(s.restorer.snapshotId) <= oldId);
+    // Fire-and-forget drops — failure (e.g. older fork without the
+    // method) is benign because `revert()` also discards them
+    // server-side; this is a memory-and-speed optimization only.
+    for (const e of evicted) {
+      rpcCall(tronWeb, 'tre_dropSnapshot', [e.restorer.snapshotId]).catch(() => {});
+    }
+    return snapshot.data;
+  }
+
+  const data = await fn();
+  const restorer = await _takeSnapshot(tronWeb);
+  _fixtureSnapshots.push({ restorer, fixture: fn, data });
+  return data;
+}
+
+// -- hardhat-network-helpers patches -------------------------------
+
+// Tests that pull `loadFixture` (and the rest of
+// `@nomicfoundation/hardhat-network-helpers`) at module-load time
+// trigger `checkIfDevelopmentNetwork(hre)`, which throws
+// `OnlyHardhatNetworkError` on any non-Hardhat network. We can't
+// modify the tests, but we can redirect what `require` resolves to.
+//
+// The package's `index.js` re-exports each helper through generated
+// `Object.defineProperty(…, { get: () => mod.<name> })` getters
+// with no setter — so mutating the index export directly silently
+// fails. Instead we mutate the underlying `dist/src/*` module
+// exports, which the getters read on every access.
+function patchNetworkHelpers(hre) {
+  const tw = () => hre.tre.makeTronWeb().tronWeb;
+
+  function tryPatch(modulePath, exportName, fn) {
+    let mod;
+    try {
+      mod = require(modulePath);
+    } catch {
+      return; // not installed in this project
+    }
+    mod[exportName] = fn;
+  }
+
+  // --- loadFixture ---
+  tryPatch('@nomicfoundation/hardhat-network-helpers/dist/src/loadFixture', 'loadFixture', loadFixture);
+
+  // --- impersonateAccount / stopImpersonatingAccount ---
+  // Patched fork: `tre_impersonateAccount` adds the address to a
+  // runtime whitelist on `TransactionCapsule.validateSignature` so
+  // any tx whose `owner_address` is whitelisted skips ECRecover.
+  // The bridge then uses the impersonating-signer path
+  // (`makeImpersonatingSigner` + `sendImpersonatedCall`) to
+  // broadcast txs with a forged `owner_address`, letting
+  // `msg.sender` checks succeed for contract-as-caller flows.
+  //
+  // On an UNPATCHED fork the RPC is method-not-found →
+  // `callOrFalse` returns `{ supported: false }`. The helper still
+  // resolves so `beforeEach` doesn't fail-fast and trigger a
+  // fixture-rerun storm; the local-registry add is skipped.
+  // Subsequent impersonated writes fail at broadcast with a clear
+  // "rebuild the fork" error.
+  tryPatch(
+    '@nomicfoundation/hardhat-network-helpers/dist/src/helpers/impersonateAccount',
+    'impersonateAccount',
+    async (address) => {
+      const base58 = signersMod.toBase58(address);
+      const r = await rpcImpersonateAccount(tw(), base58);
+      if (r.supported) registerLocalImpersonation(base58);
+    },
+  );
+  tryPatch(
+    '@nomicfoundation/hardhat-network-helpers/dist/src/helpers/stopImpersonatingAccount',
+    'stopImpersonatingAccount',
+    async (address) => {
+      const base58 = signersMod.toBase58(address);
+      await rpcStopImpersonatingAccount(tw(), base58);
+      unregisterLocalImpersonation(base58);
+    },
+  );
+
+  // --- mine / mineUpTo (block-number primitives, backed by tre_mine) ---
+  tryPatch('@nomicfoundation/hardhat-network-helpers/dist/src/helpers/mine', 'mine', async (blocks = 1, _opts = {}) =>
+    time.mine(tw(), blocks),
+  );
+  tryPatch('@nomicfoundation/hardhat-network-helpers/dist/src/helpers/mineUpTo', 'mineUpTo', async (target) =>
+    time.mineUpTo(tw(), target),
+  );
+
+  // --- time.latest / time.latestBlock ---
+  tryPatch('@nomicfoundation/hardhat-network-helpers/dist/src/helpers/time/latest', 'latest', async () =>
+    time.latest(tw()),
+  );
+  tryPatch('@nomicfoundation/hardhat-network-helpers/dist/src/helpers/time/latestBlock', 'latestBlock', async () =>
+    time.latestBlock(tw()),
+  );
+
+  // --- time.advanceBlock / time.advanceBlockTo ---
+  tryPatch('@nomicfoundation/hardhat-network-helpers/dist/src/helpers/time/advanceBlock', 'advanceBlock', async () =>
+    time.mine(tw(), 1),
+  );
+  tryPatch(
+    '@nomicfoundation/hardhat-network-helpers/dist/src/helpers/time/advanceBlockTo',
+    'advanceBlockTo',
+    async (target) => time.mineUpTo(tw(), target),
+  );
+
+  // --- time.increase / time.increaseTo / time.setNextBlockTimestamp ---
+  tryPatch('@nomicfoundation/hardhat-network-helpers/dist/src/helpers/time/increase', 'increase', async (seconds) =>
+    time.increase(tw(), seconds),
+  );
+  tryPatch('@nomicfoundation/hardhat-network-helpers/dist/src/helpers/time/increaseTo', 'increaseTo', async (target) =>
+    time.increaseTo(tw(), target),
+  );
+  tryPatch(
+    '@nomicfoundation/hardhat-network-helpers/dist/src/helpers/time/setNextBlockTimestamp',
+    'setNextBlockTimestamp',
+    async (target) => time.setNextBlockTimestamp(tw(), target),
+  );
+
+  // --- setCode / setStorageAt / getStorageAt / setBalance ---
+  // Wrap the corresponding `tre_*` cheatcodes. Tests that use
+  // `forceDeployCode(name, addr)` patterns call `setCode(addr,
+  // deployedBytecode)`. Without this redirect, those tests fail at
+  // module load.
+  const { setAccountCode, setAccountStorageAt, setAccountBalance } = require('./cheatcodes');
+
+  tryPatch('@nomicfoundation/hardhat-network-helpers/dist/src/helpers/setCode', 'setCode', async (address, code) => {
+    const addr = signersMod.toBase58(address);
+    const r = await setAccountCode(tw(), addr, code);
+    if (!r.supported) throw new Error(`setCode failed: ${r.reason}`);
+  });
+
+  tryPatch(
+    '@nomicfoundation/hardhat-network-helpers/dist/src/helpers/setStorageAt',
+    'setStorageAt',
+    async (address, slot, value) => {
+      const addr = signersMod.toBase58(address);
+      const slotHex = typeof slot === 'bigint' ? ethersV6.toBeHex(slot, 32) : slot;
+      const valueHex = typeof value === 'bigint' ? ethersV6.toBeHex(value, 32) : value;
+      const r = await setAccountStorageAt(tw(), addr, slotHex, valueHex);
+      if (!r.supported) throw new Error(`setStorageAt failed: ${r.reason}`);
+    },
+  );
+
+  tryPatch(
+    '@nomicfoundation/hardhat-network-helpers/dist/src/helpers/getStorageAt',
+    'getStorageAt',
+    async (address, slot) => {
+      const addr = signersMod.toBase58(address);
+      const slotHex = typeof slot === 'bigint' ? ethersV6.toBeHex(slot, 32) : slot;
+      // TronWeb doesn't expose per-slot storage directly; use the
+      // `debug_storageRangeAt` RPC which TRE inherits from
+      // java-tron.
+      const rpc = await tw().fullNode.host;
+      const res = await fetch(rpc.replace(/\/$/, '') + '/tre', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'debug_storageRangeAt',
+          params: [0, 0, addr, slotHex, 1],
+        }),
+      }).then((r) => r.json());
+      const storage = res.result && res.result.storage;
+      if (storage) {
+        const entry = Object.values(storage)[0];
+        if (entry && entry.value) return '0x' + entry.value;
+      }
+      return '0x' + '0'.repeat(64);
+    },
+  );
+
+  tryPatch(
+    '@nomicfoundation/hardhat-network-helpers/dist/src/helpers/setBalance',
+    'setBalance',
+    async (address, balance) => {
+      const addr = signersMod.toBase58(address);
+      // 1 wei == 1 sun pass-through on the JS↔TVM boundary;
+      // java-tron's `TreUtil.decodeLong` accepts up to
+      // `Long.MAX_VALUE` (~9.22e18 sun). Tests passing
+      // `parseEther("10")` or above will overflow. Cap to
+      // Long.MAX_VALUE so the test sees a useful error rather than
+      // a generic "integer decode error".
+      const LONG_MAX = 9_223_372_036_854_775_807n;
+      const b = typeof balance === 'bigint' ? balance : BigInt(balance);
+      if (b > LONG_MAX) {
+        throw new Error(
+          `setBalance: ${b} exceeds Long.MAX_VALUE (${LONG_MAX}) — TVM stores account balance as a Java long. ` +
+            'Cap funding requests at ~9 ether-equivalent for TVM tests.',
+        );
+      }
+      const r = await setAccountBalance(tw(), addr, String(b));
+      if (!r.supported) throw new Error(`setBalance failed: ${r.reason}`);
+    },
+  );
+}
+
 extendEnvironment((hre) => {
   if (!(hre.network && hre.network.config && hre.network.config.tron)) return;
   // Give the stubProvider a handle to hre so its lazy methods
   // (getCode/getBalance/getStorage/getBlockNumber) can build TronWeb.
   stubProvider._hre = hre;
+
+  // Redirect `hardhat-network-helpers` to TVM-aware implementations
+  // so unmodified tests resolve `time.*`, `mine*`, `loadFixture`,
+  // and the state-mutators to the cheatcode-backed versions instead
+  // of the upstream `OnlyHardhatNetworkError`-throwing defaults.
+  patchNetworkHelpers(hre);
 
   // Install TVM-aware chai matchers (changeTokenBalance(s),
   // changeEtherBalance(s)). Upstream chai-matchers issues
@@ -1945,6 +2255,7 @@ module.exports = {
   makeFactory,
   deployViaFacade,
   makeSigners,
+  loadFixture,
 
   // Surfaced for `src/runtime/deploy.js` so its constructor-revert
   // path can throw an ethers-shaped error with `.data` for chai
