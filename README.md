@@ -124,7 +124,46 @@ The plugin installs a global HTTP keep-alive agent at module load. This eliminat
 
 ## Patched FullNode.jar
 
-The cheatcodes that mutate VM state — `setAccountBalance`, `setAccountCode`, `setAccountStorageAt`, `unlockAccounts`, `snapshot`, `revert` — call `tre_*` JSON-RPC methods that stock java-tron does not implement. They live on a custom `/tre` endpoint served by a patched `FullNode.jar` built from a minor java-tron fork. Each call returns `{ supported, ... }`, so tests can degrade cleanly when running against a stock node. A build pipeline for the patched jar lands later in the rollout.
+The cheatcodes that mutate VM state — `setAccountBalance`, `setAccountCode`, `setAccountStorageAt`, `unlockAccounts`, `snapshot`, `revert`, plus instant time-warps via `setNextBlockTimestamp` — call `tre_*` JSON-RPC methods that stock java-tron does not implement. They live on a custom `/tre` endpoint served by a patched `FullNode.jar` built from a minor java-tron fork. Each call returns `{ supported, ... }`, so tests degrade cleanly when running against a stock node.
+
+### Building the patched jar
+
+The Java sources live under [`docker/src/`](docker/src/) and the build pipeline is a self-contained bash script:
+
+```bash
+bash docker/build-jar.sh
+```
+
+What it does:
+
+1. Spins a temporary `tronbox/tre:dev` container.
+2. Uses its bundled OpenJDK 8 toolchain to compile [`docker/src/**/*.java`](docker/src/) against the image's unpatched `FullNode.jar` (used as the classpath).
+3. Repacks the upstream jar with the patched `.class` files overlaid (a small Python ZIP step handles top-level classes plus their nested inner classes).
+4. Pulls the resulting jar back to the host as `tre/FullNode.jar`. The temp container is torn down on exit.
+
+Output is gitignored — it's reproducible from `docker/src/` and a 100+ MB jar isn't worth committing.
+
+### Files touched by the patch
+
+| File                                                               | Effect                                                                                                                                                       |
+| ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `org/tron/core/services/jsonrpc/tre/TreJsonRpc.java`               | New JSON-RPC interface declaring the `tre_*` methods                                                                                                         |
+| `org/tron/core/services/jsonrpc/tre/TreJsonRpcImpl.java`           | Implementations — direct AccountStore / CodeStore / ContractStore writes, snapshot/revert via `LinkedHashMap`, version probe returns `v1.0.4-oz-tron`        |
+| `org/tron/core/services/jsonrpc/tre/TreImpersonationRegistry.java` | Per-process whitelist of base58 addresses that bypass ECRecover in `validateSignature`                                                                       |
+| `org/tron/core/capsule/TransactionCapsule.java`                    | Patched: inline check against `TreImpersonationRegistry` in `validateSignature` so txs with a whitelisted `owner_address` skip ECRecover + permission/weight |
+| `org/tron/consensus/dpos/DposSlot.java`                            | Patched: one-shot timestamp override hooks so `tre_setNextBlockTimestamp` can fast-forward chain time without 1:1 wall-clock waits                           |
+
+### Wiring the jar into Hardhat
+
+Once built, point the lifecycle wrapper at it with `tre.jarPath`:
+
+```js
+tre: {
+  jarPath: './tre/FullNode.jar',
+},
+```
+
+The lifecycle wrapper bind-mounts the file over the image's stock jar (`/tron/FullNode/FullNode.jar:ro`) so the container starts already-patched. The runtime probes (`src/runtime/time.js`, snapshot stack in `src/runtime/ethers-bridge.js`) detect the patched jar via `tre_version` returning the `-oz-tron` suffix.
 
 ## Signer rebalancing between test files
 
