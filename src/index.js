@@ -8,8 +8,16 @@ require('./runtime/http-agent');
 const { extendEnvironment } = require('hardhat/config');
 
 const treWeb = require('./runtime/tre-web');
+const cheatcodes = require('./runtime/cheatcodes');
 
 extendEnvironment((hre) => {
   hre.tre = hre.tre || {};
-  hre.tre.makeTronWeb = () => treWeb.makeTronWeb(hre);
+  Object.assign(hre.tre, {
+    makeTronWeb: () => treWeb.makeTronWeb(hre),
+    rpcCall: cheatcodes.rpcCall,
+    mine: cheatcodes.mine,
+    setBlockTime: cheatcodes.setBlockTime,
+    snapshot: cheatcodes.snapshot,
+    revert: cheatcodes.revert,
+  });
 });
