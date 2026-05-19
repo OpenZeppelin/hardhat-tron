@@ -1832,6 +1832,23 @@ extendEnvironment((hre) => {
   // Give the stubProvider a handle to hre so its lazy methods
   // (getCode/getBalance/getStorage/getBlockNumber) can build TronWeb.
   stubProvider._hre = hre;
+
+  // Install TVM-aware chai matchers (changeTokenBalance(s),
+  // changeEtherBalance(s)). Upstream chai-matchers issues
+  // `eth_getBlockByHash` + historical `eth_getBalance` / `eth_call`
+  // calls that our java-tron FullNode doesn't serve; the
+  // replacements compute balance changes from receipt logs +
+  // `internal_transactions`. `Assertion.addMethod` REPLACES prior
+  // registrations, so ordering vs. `hardhat-chai-matchers` doesn't
+  // matter — last wins.
+  try {
+    require('./chai-matchers-tvm').register();
+  } catch {
+    // chai not yet installed in this resolution? Test-time
+    // `require('chai')` will surface the error if so. Don't fail
+    // boot here.
+  }
+
   if (!hre.ethers) return;
 
   // `args` is positional in tests (`deployContract(name, [a,b])`)
