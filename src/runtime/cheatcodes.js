@@ -5,9 +5,10 @@
 // `/jsonrpc` endpoint is the EVM-compat shim and does not expose
 // `tre_*`.
 //
-// This module ships only the time/snapshot subset (`mine`,
-// `setBlockTime`, `snapshot`, `revert`); account-state and
-// impersonation cheatcodes layer on later modules and contracts.
+// This module ships the time/snapshot subset (`mine`, `setBlockTime`,
+// `snapshot`, `revert`) plus the account-state mutators
+// (`setAccountBalance`, `setAccountCode`, `setAccountStorageAt`,
+// `unlockAccounts`). Impersonation cheatcodes layer on later.
 
 async function rpcCall(tronWeb, method, params = []) {
   const url = tronWeb.fullNode.host.replace(/\/$/, '') + '/tre';
@@ -46,6 +47,24 @@ const setBlockTime = (tw, seconds) => callOrFalse(tw, 'tre_blockTime', [seconds]
 const snapshot = (tw) => callOrFalse(tw, 'tre_snapshot', []);
 const revert = (tw, id) => callOrFalse(tw, 'tre_revert', [id]);
 
+// Account-state mutators. Each writes directly to the patched
+// FullNode's account / code / storage stores via `tre_*` JSON-RPC.
+//
+// `sun` is stringified before transport because TVM balances can
+// exceed 2^53 (Long.MAX_VALUE ≈ 9.22e18 sun); JSON-RPC integer
+// literals above 2^53 lose precision in the JS → Java round-trip
+// unless they go over the wire as strings.
+const setAccountBalance = (tw, addr, sun) => callOrFalse(tw, 'tre_setAccountBalance', [addr, String(sun)]);
+const setAccountCode = (tw, addr, code) => callOrFalse(tw, 'tre_setAccountCode', [addr, code]);
+const setAccountStorageAt = (tw, addr, slot, value) => callOrFalse(tw, 'tre_setAccountStorageAt', [addr, slot, value]);
+
+// `unlockAccounts` adds a list of base58 addresses to a per-session
+// whitelist consulted by `TransactionCapsule.validateSignature`. Any
+// tx whose `owner_address` is on the list is accepted regardless of
+// which key signed it. Used by tests that need to send from accounts
+// they don't hold the private key for.
+const unlockAccounts = (tw, addrs) => callOrFalse(tw, 'tre_unlockedAccounts', [addrs]);
+
 module.exports = {
   rpcCall,
   callOrFalse,
@@ -53,4 +72,8 @@ module.exports = {
   setBlockTime,
   snapshot,
   revert,
+  setAccountBalance,
+  setAccountCode,
+  setAccountStorageAt,
+  unlockAccounts,
 };
