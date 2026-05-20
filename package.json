@@ -1,6 +1,6 @@
 {
   "name": "@openzeppelin/hardhat-tron",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Hardhat plugin for compiling and deploying Solidity contracts to TRON TVM.",
   "license": "MIT",
   "main": "src/index.js",
