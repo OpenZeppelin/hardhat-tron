@@ -1466,25 +1466,37 @@ function makeOverloadDispatcher(overloads, tronAddress, tronWeb, hre, ethersInte
 const _artifactCache = new Map();
 let _artifactIndex = null;
 
-function _buildArtifactIndex(root) {
+function _buildArtifactIndex(roots) {
   const idx = new Map();
-  if (!fs.existsSync(root)) return idx;
-  for (const entry of fs.readdirSync(root, { recursive: true })) {
-    if (typeof entry !== 'string') continue;
-    if (!entry.endsWith('.json')) continue;
-    // Skip Hardhat's `dbg.json` debug-info files; only `<Contract>.json`
-    // is a real artifact.
-    if (entry.endsWith('.dbg.json')) continue;
-    const base = path.basename(entry, '.json');
-    const abs = path.join(root, entry);
-    let bucket = idx.get(base);
-    if (!bucket) {
-      bucket = [];
-      idx.set(base, bucket);
+  for (const root of roots) {
+    if (!fs.existsSync(root)) continue;
+    for (const entry of fs.readdirSync(root, { recursive: true })) {
+      if (typeof entry !== 'string') continue;
+      if (!entry.endsWith('.json')) continue;
+      // Skip Hardhat's `dbg.json` debug-info files; only `<Contract>.json`
+      // is a real artifact.
+      if (entry.endsWith('.dbg.json')) continue;
+      const base = path.basename(entry, '.json');
+      const abs = path.join(root, entry);
+      let bucket = idx.get(base);
+      if (!bucket) {
+        bucket = [];
+        idx.set(base, bucket);
+      }
+      bucket.push(abs);
     }
-    bucket.push(abs);
   }
   return idx;
+}
+
+// Project-source artifact roots scanned for bare-name lookup. Includes
+// the main source tree (`contracts/`) and the `hardhat-exposed` wrapper
+// tree (`contracts-exposed/`, the plugin's default outDir). Other
+// top-level entries under `artifacts/` (`build-info/`, dependency
+// packages like `@openzeppelin/...`) are intentionally excluded — they
+// are huge (build-info) or only addressable via fully-qualified name.
+function _artifactRoots(artifactsDir) {
+  return [path.join(artifactsDir, 'contracts'), path.join(artifactsDir, 'contracts-exposed')];
 }
 
 function loadArtifact(hre, name) {
@@ -1503,21 +1515,21 @@ function loadArtifact(hre, name) {
     _artifactCache.set(name, a);
     return a;
   }
-  // Bare name lookup via prebuilt name → paths index. Both originals
-  // (`Foo.json`) and `hardhat-exposed`-generated wrappers (`$Foo.json`)
-  // live under the same tree because `exposed.outDir =
-  // 'contracts/exposed'` in hardhat.config.cjs.
-  const root = path.join(artifactsDir, 'contracts');
-  if (!_artifactIndex) _artifactIndex = _buildArtifactIndex(root);
+  // Bare name lookup via prebuilt name → paths index. Walks both the
+  // main source tree and the `hardhat-exposed` wrapper tree so originals
+  // (`Foo.json`) and exposed wrappers (`$Foo.json`) are both findable
+  // regardless of the plugin's outDir setting.
+  const roots = _artifactRoots(artifactsDir);
+  if (!_artifactIndex) _artifactIndex = _buildArtifactIndex(roots);
   const candidates = _artifactIndex.get(name);
   if (!candidates || candidates.length === 0) {
     // Possible cause: artifact written AFTER the index was built (rare
     // in test flows — compile runs before test). Rebuild once and retry
     // before giving up.
-    _artifactIndex = _buildArtifactIndex(root);
+    _artifactIndex = _buildArtifactIndex(roots);
     const retry = _artifactIndex.get(name);
     if (!retry || retry.length === 0) {
-      throw new Error(`Artifact for contract "${name}" not found in ${root}`);
+      throw new Error(`Artifact for contract "${name}" not found in ${roots.join(', ')}`);
     }
     if (retry.length > 1) {
       throw new Error(
