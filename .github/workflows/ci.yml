@@ -17,3 +17,18 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run format:check
+
+  test:
+    name: Mocha
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      # The e2e suite self-skips when no TRE is reachable; CI doesn't
+      # spin up a container, so unit-style tests run and the e2e
+      # block is reported as pending.
+      - run: npm test
