@@ -2,7 +2,10 @@
 
 Hardhat plugin for compiling and deploying Solidity contracts to the TRON Virtual Machine.
 
-> **Status: work in progress.** The public API is unstable until the `0.1.0` release.
+[![npm version](https://img.shields.io/npm/v/@openzeppelin/hardhat-tron.svg)](https://www.npmjs.com/package/@openzeppelin/hardhat-tron)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+The public API is documented under [`src/types.d.ts`](src/types.d.ts). Releases follow [SemVer](https://semver.org/spec/v2.0.0.html); see [`CHANGELOG.md`](CHANGELOG.md) for what's in each version.
 
 ## Compile
 
