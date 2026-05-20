@@ -18,7 +18,8 @@
   ],
   "scripts": {
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "test": "mocha --recursive --timeout 60000 'test/*.test.js'"
   },
   "publishConfig": {
     "access": "public"
