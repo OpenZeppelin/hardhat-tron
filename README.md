@@ -5,7 +5,126 @@ Hardhat plugin for compiling and deploying Solidity contracts to the TRON Virtua
 [![npm version](https://img.shields.io/npm/v/@openzeppelin/hardhat-tron.svg)](https://www.npmjs.com/package/@openzeppelin/hardhat-tron)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
+Write Solidity for TRON the same way you would for any EVM chain. The plugin compiles your contracts with `tron-solc` (a TVM-targeted fork of `solc`), runs them against a local TRON node (`java-tron`, **TRE**) that it spins up for you in Docker, and exposes the familiar `hre.ethers.*` surface so unmodified ethers tests work against the TVM.
+
 The public API is documented under [`src/types.d.ts`](src/types.d.ts). Releases follow [SemVer](https://semver.org/spec/v2.0.0.html); see [`CHANGELOG.md`](CHANGELOG.md) for what's in each version.
+
+## Prerequisites
+
+Before installing, make sure you have:
+
+1. **Node.js 20 or newer** — `node --version`
+2. **Docker** running locally — the plugin spawns a TRON node in a container
+3. **A Hardhat project** — `npx hardhat init` in an empty folder if you don't have one yet
+
+## Quick Start
+
+### 1. Install
+
+```bash
+npm install --save-dev @openzeppelin/hardhat-tron \
+  hardhat \
+  @nomicfoundation/hardhat-ethers \
+  @nomicfoundation/hardhat-chai-matchers \
+  ethers
+```
+
+Peer deps: `hardhat ^2.26`, `@nomicfoundation/hardhat-ethers ^3`, `@nomicfoundation/hardhat-chai-matchers ^2`, `ethers ^6.14`.
+
+### 2. Configure Hardhat
+
+Open (or create) `hardhat.config.cjs`:
+
+```js
+require('@nomicfoundation/hardhat-ethers');
+require('@nomicfoundation/hardhat-chai-matchers');
+require('@openzeppelin/hardhat-tron');
+
+module.exports = {
+  solidity: {
+    version: '0.8.26',
+    settings: {
+      optimizer: { enabled: true, runs: 200 },
+      evmVersion: 'cancun',
+      viaIR: true,
+      // Embed source as literal text in metadata so verification
+      // services (Sourcify, etc.) can reconstruct it deterministically.
+      metadata: { bytecodeHash: 'ipfs', useLiteralContent: true },
+    },
+  },
+  tre: {
+    autoStart: true,
+    image: 'tronbox/tre:dev',
+    compiler: { target: 'tron' },
+  },
+  defaultNetwork: 'tre',
+  networks: {
+    tre: {
+      url: process.env.TRE_URL || 'http://127.0.0.1:9090/jsonrpc',
+      tron: true,
+      accounts: [process.env.TRE_PRIVATE_KEY || '0xdd23ca549a97cb330b011aebb674730df8b14acaee42d211ab45692699ab8ba5'],
+    },
+  },
+};
+```
+
+> The default key shown above is a well-known TRE dev key — fine for local tests, **never** use it on a real network.
+
+### 3. Compile
+
+```bash
+npx hardhat compile
+```
+
+The first run fetches `tron-solc` (a few MB), verifies its SHA-256 against the canonical `tronprotocol/solc-bin` manifest, and writes artifacts to `artifacts/`. Subsequent runs use the cache.
+
+### 4. Run your tests
+
+```bash
+npx hardhat test
+```
+
+The plugin pulls `tronbox/tre:dev` on first use, starts a TRE container, waits for the node to be ready, runs your Mocha tests, then stops and removes the container.
+
+## Writing a test
+
+Your existing ethers-based tests work as-is:
+
+```js
+// test/Counter.test.js
+const { expect } = require('chai');
+const { ethers } = require('hardhat');
+
+describe('Counter', () => {
+  it('increments', async () => {
+    const counter = await ethers.deployContract('Counter');
+    await counter.increment();
+    expect(await counter.value()).to.equal(1n);
+  });
+});
+```
+
+For TRON-specific operations (time-warp, balance manipulation, raw TronWeb access), the plugin exposes `hre.tre`:
+
+```js
+const { tronWeb, address } = hre.tre.makeTronWeb();
+const counter = await hre.tre.deployContract('Counter');
+await hre.tre.mine(tronWeb); // tre_mine cheatcode
+await hre.tre.setBlockTime(tronWeb, 0); // instamine
+await hre.tre.setAccountBalance(tronWeb, addr, 10n ** 18n);
+```
+
+## Troubleshooting
+
+**"Cannot connect to the Docker daemon"** — Docker isn't running. Start it and try again.
+
+**Tests hang on startup** — first-time image pull can take a minute or two. Run `docker pull tronbox/tre:dev` manually to see progress.
+
+**Port 9090 already in use** — set `tre.port` to a free port in your config (and update the network `url` to match).
+
+**Want to manage the container yourself?** Set `tre.autoStart: false` and start TRE manually with `docker run --rm -p 9090:9090 tronbox/tre:dev`.
+
+---
 
 ## Compile
 
