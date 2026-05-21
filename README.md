@@ -1,26 +1,43 @@
 # @openzeppelin/hardhat-tron
 
-Hardhat plugin for compiling and deploying Solidity contracts onto the TRON TVM via a local `java-tron` (TRE) container.
+A Hardhat plugin that lets you write, compile, and test Solidity contracts for the **TRON network** the same way you would for any EVM chain — using familiar tools like `ethers`, `chai`, and `npx hardhat test`.
 
-Features:
+Under the hood it compiles your contracts with the TRON-flavored Solidity compiler (`tron-solc`) and runs them against a local TRON node (`java-tron`, aka **TRE**) that the plugin spins up for you inside Docker.
 
-- **One source of truth for compiler config.** Reads `solidity.compilers` directly — no parallel compiler array to keep in sync.
-- **SHA-256 verified wasm downloads.** Fetches tron-solc from the canonical `tronprotocol/solc-bin` mirror and verifies each blob against the upstream `list.json` manifest.
-- **Glob include/exclude.** Two `Test.sol` files in different directories are individually addressable; basename-only filtering would silently conflate them.
-- **No source-file rewriting.** The compiler sees exactly what's on disk; no pragma regex hacks. Source maps, stack traces, and IDE jumps stay accurate.
-- **Stock artifact paths by default.** `artifacts/` and `cache/` — opt into an `artifacts-tron/` suffix only when you actually need a dual EVM+Tron build coexisting in one project.
-- **No `hardhat-deploy` dependency.** Compile and runtime helpers are independent of the deployments toolchain.
-- **Auto-spawn the TRE container.** `npx hardhat test` brings the container up, runs, tears it down. Override with `tre.autoStart: false` if you manage containers yourself.
+## What you get
 
-## Install
+- **Write tests like you always do.** `hre.ethers.deployContract(...)`, chai matchers, signers — all wired up to TRON.
+- **Zero-config local node.** `npx hardhat test` starts a TRE container, runs your tests, and tears it down. No manual `docker run`.
+- **One compiler config.** Reuses your existing `solidity.compilers` block — nothing parallel to keep in sync.
+- **Safe binary downloads.** Fetches `tron-solc` wasm from the official `tronprotocol/solc-bin` mirror and verifies each blob against the upstream SHA-256 manifest.
+- **No source rewriting.** Your `.sol` files reach the compiler exactly as written — pragmas, source maps, IDE jumps, and stack traces all stay correct.
+- **Standard artifact paths.** Outputs to `artifacts/` and `cache/` by default. Opt into a `-tron` suffix only if you need a dual EVM + TRON build in one project.
+
+## Prerequisites
+
+Before you install, make sure you have:
+
+1. **Node.js 20 or newer** — `node --version`
+2. **Docker Desktop running** — the plugin spawns a TRON node in a container
+3. **A Hardhat project** — if you don't have one yet, run `npx hardhat init` in an empty folder
+
+## Step 1 — Install
+
+From inside your Hardhat project:
 
 ```bash
-npm install @openzeppelin/hardhat-tron
+npm install --save-dev @openzeppelin/hardhat-tron \
+  hardhat \
+  @nomicfoundation/hardhat-ethers \
+  @nomicfoundation/hardhat-chai-matchers \
+  ethers
 ```
 
-Peer deps: `hardhat ^2.26`, `@nomicfoundation/hardhat-ethers ^3`, `@nomicfoundation/hardhat-chai-matchers ^2`, `ethers ^6.14`.
+The peer deps (`hardhat ^2.26`, `@nomicfoundation/hardhat-ethers ^3`, `@nomicfoundation/hardhat-chai-matchers ^2`, `ethers ^6.14`) are required — install them if you don't have them already.
 
-## Usage
+## Step 2 — Configure Hardhat
+
+Open (or create) `hardhat.config.cjs` and replace its contents with:
 
 ```js
 // hardhat.config.cjs
@@ -35,43 +52,97 @@ module.exports = {
       optimizer: { enabled: true, runs: 200 },
       evmVersion: 'cancun',
       viaIR: true,
-      // Embed source code as literal text inside each contract's
-      // metadata JSON so verification services (Sourcify, Etherscan,
-      // ...) can reconstruct it. Without this flag the metadata IPFS
-      // hash baked into bytecode shifts; set it explicitly for
-      // reproducibility.
+      // Embed source as literal text in metadata so verification
+      // services (Sourcify, etc.) can reconstruct it deterministically.
       metadata: { bytecodeHash: 'ipfs', useLiteralContent: true },
     },
   },
   tre: {
     autoStart: true,
     image: 'tronbox/tre:dev',
-    // Optional: bind-mount a patched FullNode.jar for time-warp +
-    // snapshot/revert. Without it, those degrade to real-time waits.
-    // jarPath: './path/to/FullNode.jar',
-    compiler: {
-      target: 'tron',
-      // include: ['contracts/**/*.sol'],   // optional; defaults to all sources
-      // exclude: ['contracts/vendor/**'],
-    },
+    compiler: { target: 'tron' },
   },
   defaultNetwork: 'tre',
   networks: {
     tre: {
       url: process.env.TRE_URL || 'http://127.0.0.1:9090/jsonrpc',
       tron: true,
-      accounts: [process.env.TRE_PRIVATE_KEY || '0xdd23ca549a97cb330b011aebb674730df8b14acaee42d211ab45692699ab8ba5'],
+      accounts: [
+        process.env.TRE_PRIVATE_KEY ||
+          '0xdd23ca549a97cb330b011aebb674730df8b14acaee42d211ab45692699ab8ba5',
+      ],
     },
   },
 };
 ```
 
-Then:
+> The default private key shown above is a well-known TRE dev key — fine for local tests, **never** use it on a real network.
+
+## Step 3 — Compile your contracts
 
 ```bash
-npx hardhat compile     # tron-solc, SHA-256 verified, output to artifacts/
-npx hardhat test        # auto-spawns tronbox/tre:dev, runs tests, tears down
+npx hardhat compile
 ```
+
+The first run downloads `tron-solc` (a few MB), verifies its SHA-256, and writes artifacts to `artifacts/`. Subsequent runs use the cache.
+
+## Step 4 — Run your tests
+
+```bash
+npx hardhat test
+```
+
+The plugin will:
+
+1. Pull `tronbox/tre:dev` if you don't have it (one-time, a few hundred MB)
+2. Start a TRE container in the background
+3. Wait until the node is ready
+4. Run your Mocha tests against it
+5. Stop and remove the container when tests finish
+
+That's it. You're testing Solidity on TRON.
+
+## Writing a test
+
+Your existing ethers-based tests work as-is. Here's a minimal example:
+
+```js
+// test/Counter.test.js
+const { expect } = require('chai');
+const { ethers } = require('hardhat');
+
+describe('Counter', () => {
+  it('increments', async () => {
+    const counter = await ethers.deployContract('Counter');
+    await counter.increment();
+    expect(await counter.value()).to.equal(1n);
+  });
+});
+```
+
+For TRON-specific things (time-warp, balance manipulation, raw TronWeb access) the plugin exposes `hre.tre`:
+
+```js
+const { tronWeb, address } = hre.tre.makeTronWeb();
+const counter = await hre.tre.deployContract('Counter');
+await hre.tre.mine(tronWeb);                              // tre_mine cheatcode
+await hre.tre.setBlockTime(tronWeb, 0);                   // instamine
+await hre.tre.setAccountBalance(tronWeb, addr, 10n ** 18n);
+```
+
+`hre.ethers.{deployContract, getContractFactory, getSigners, getContractAt, provider}` are transparently overridden, so unmodified ethers tests run against TRE without any fixture changes.
+
+## Troubleshooting
+
+**"Cannot connect to the Docker daemon"** — Docker isn't running. Start Docker Desktop and try again.
+
+**Tests hang on startup** — first-time image pull can take a minute or two. Run `docker pull tronbox/tre:dev` manually to see progress.
+
+**Port 9090 already in use** — set `tre.port` to a free port in your config (and update the network `url` to match).
+
+**Want to manage the container yourself?** Set `tre.autoStart: false` and start TRE manually with `docker run --rm -p 9090:9090 tronbox/tre:dev`.
+
+---
 
 ## Configuration reference
 
@@ -105,24 +176,9 @@ npx hardhat test        # auto-spawns tronbox/tre:dev, runs tests, tears down
 | `batches` | `undefined` | Inline batch defs for the `tron:compile-batches` task. |
 | `batchesPath` | `undefined` | Path to a CJS module exporting the array. |
 
-## `hre.tre.*` runtime helpers
+## Advanced: batched compile
 
-When loaded, the plugin extends the Hardhat runtime with `hre.tre`:
-
-```js
-// Drop into a test:
-const { tronWeb, address } = hre.tre.makeTronWeb();
-const counter = await hre.tre.deployContract('Counter');
-await hre.tre.mine(tronWeb);                           // tre_mine cheatcode
-await hre.tre.setBlockTime(tronWeb, 0);                // instamine
-await hre.tre.setAccountBalance(tronWeb, addr, 10n ** 18n);
-```
-
-It also overrides `hre.ethers.{deployContract, getContractFactory, getSigners, getContractAt, provider}` so unmodified ethers-based tests can run against TRE without rewriting fixtures.
-
-## Batched compile
-
-The 0.8.26 tron-solc wasm has a memory ceiling that large source trees (e.g. the OpenZeppelin v5 corpus, ~700 files) exceed in a single pass. The `tron:compile-batches` task splits compilation into passes that each stay under the limit. Single-process, shared cache across passes.
+The 0.8.26 `tron-solc` wasm has a memory ceiling that very large source trees (e.g. the OpenZeppelin v5 corpus, ~700 files) exceed in a single pass. The `tron:compile-batches` task splits compilation into multiple passes that each stay under the limit. Single-process, shared cache across passes.
 
 ```js
 // hardhat.config.cjs
@@ -137,7 +193,7 @@ tre: {
 },
 ```
 
-Then `npx hardhat tron:compile-batches`.
+Then run `npx hardhat tron:compile-batches`.
 
 Each batch entry:
 
@@ -146,16 +202,24 @@ Each batch entry:
 - `extraLeaves` — basenames (no `.sol`); expanded to `**/<name>.sol`
 - `include` — raw globs that override `dirs`/`extraLeaves` expansion
 
-## Docker / FullNode.jar
+## Advanced: patched FullNode.jar (time-warp + snapshot/revert)
 
-The `docker/` directory contains Java patches that enable time-warp (`time.increase`, `setNextBlockTimestamp`) and snapshot/revert semantics. Build the patched jar locally:
+The `docker/` directory contains Java patches that enable `time.increase`, `setNextBlockTimestamp`, and snapshot/revert semantics on TRE. Without the patch, those operations degrade to real-time waits (i.e. actually sleeping for the requested duration).
+
+To build the patched jar locally:
 
 ```bash
 bash node_modules/@openzeppelin/hardhat-tron/docker/build-jar.sh
 ```
 
-This produces a ~200 MB `FullNode.jar`. Stage it somewhere stable in your project and reference it via `tre.jarPath`. Without the patch, the stock `tronbox/tre:dev` image's jar is used and time-warps degrade to real-time waits.
+This produces a ~200 MB `FullNode.jar`. Stage it somewhere stable in your project and point at it from your config:
+
+```js
+tre: {
+  jarPath: './path/to/FullNode.jar',
+},
+```
 
 ## License
 
-MIT — see `LICENSE`.
+MIT — see [LICENSE](LICENSE).
