@@ -98,33 +98,60 @@ function jsonStringifyWithBigInts(obj) {
 // TransactionCapsule.validateSignature still accepts the tx via the
 // TreImpersonationRegistry bypass).
 async function sendCallTx(tronWeb, { fromBase58, toBase58, data, value = 0n, multisig = false, feeLimit }) {
+  // EVM-predicted → TVM-actual rewrite. If `toBase58` is the EVM-simulator
+  // address that a prior `staticCall` returned (e.g. from `factory.$clone
+  // .staticCall(impl)`), route the broadcast to the actual TVM-deployed
+  // address instead. See top-of-file _evmToTvm comment.
+  const remapped = lookupTvmActualBase58(toBase58);
+  if (remapped) toBase58 = remapped;
+
   const base = tronWeb.fullNode.host.replace(/\/$/, '');
   const dataHex = typeof data === 'string' && data.startsWith('0x') ? data.slice(2) : data || '';
   // Pass-through (1 wei == 1 sun): see top-of-file unit-model comment.
   // Java-tron's /wallet/triggersmartcontract declares call_value as a
   // Long; we serialize as a Number. Bounded by Long.MAX_VALUE (~9.22e18).
-  const triggerResp = await fetch(base + '/wallet/triggersmartcontract', {
+  const triggerBody = jsonStringifyWithBigInts({
+    owner_address: TronWeb.address.toHex(fromBase58),
+    contract_address: TronWeb.address.toHex(toBase58),
+    // When `data` is supplied directly (no function_selector),
+    // java-tron's TriggerSmartContract handler uses it verbatim
+    // as the transaction's `data` field — so we don't need to
+    // know the function signature to send raw calldata.
+    data: dataHex,
+    // Caller-provided `feeLimit` (sun) honors `overrides.gasLimit`
+    // from chai-matchers tests that probe OOG paths; default to
+    // TRE's hard cap of 1_000_000_000 sun (≈ 10M energy @ 100
+    // sun/energy) when unset.
+    fee_limit: feeLimit != null ? Number(feeLimit) : 1_000_000_000,
+    call_value: valueToCallValue(value),
+    visible: false,
+  });
+  const doTrigger = () => fetch(base + '/wallet/triggersmartcontract', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: jsonStringifyWithBigInts({
-      owner_address: TronWeb.address.toHex(fromBase58),
-      contract_address: TronWeb.address.toHex(toBase58),
-      // When `data` is supplied directly (no function_selector),
-      // java-tron's TriggerSmartContract handler uses it verbatim
-      // as the transaction's `data` field — so we don't need to
-      // know the function signature to send raw calldata.
-      data: dataHex,
-      // Caller-provided `feeLimit` (sun) honors `overrides.gasLimit`
-      // from chai-matchers tests that probe OOG paths; default to
-      // TRE's hard cap of 1_000_000_000 sun (≈ 10M energy @ 100
-      // sun/energy) when unset.
-      fee_limit: feeLimit != null ? Number(feeLimit) : 1_000_000_000,
-      call_value: valueToCallValue(value),
-      visible: false,
-    }),
-  });
-  
-  const triggerJson = await triggerResp.json();
+    body: triggerBody,
+  }).then(r => r.json());
+
+  let triggerJson = await doTrigger();
+  if (!triggerJson.transaction || (triggerJson.result && triggerJson.result.code)) {
+    // CREATE/CREATE2 recovery. java-tron only registers contracts in
+    // ContractStore when they're deployed via CreateSmartContract
+    // transactions — contracts produced by EVM-level CREATE/CREATE2
+    // (e.g. EIP-1167 minimal proxies / OZ Clones) end up with bytecode
+    // in CodeStore but NO entry in ContractStore. The subsequent
+    // triggersmartcontract validation in WalletApi#triggerContract
+    // (`if (deployedContract == null) throw "No contract or not a
+    // valid smart contract"`) rejects the call.
+    //
+    // Recover by querying the address's code via eth_getCode (which
+    // reads CodeStore directly, bypassing ContractStore) and, if code
+    // exists, calling tre_setAccountCode to force-register the address
+    // as a contract in ContractStore. Then retry the trigger once.
+    const registered = await maybeAutoRegisterContract(tronWeb, toBase58, triggerJson);
+    if (registered) {
+      triggerJson = await doTrigger();
+    }
+  }
   if (!triggerJson.transaction || (triggerJson.result && triggerJson.result.code)) {
     throw new Error(`triggersmartcontract failed: ${JSON.stringify(triggerJson)}`);
   }
@@ -154,6 +181,9 @@ async function sendCallTx(tronWeb, { fromBase58, toBase58, data, value = 0n, mul
 // makeImpersonatingSigner.sendTransaction({to, value}) when no
 // calldata is present.
 async function sendTransferTx(tronWeb, { fromBase58, toBase58, value, multisig = false }) {
+  const remapped = lookupTvmActualBase58(toBase58);
+  if (remapped) toBase58 = remapped;
+
   const base = tronWeb.fullNode.host.replace(/\/$/, '');
   // Pass-through (1 wei == 1 sun): see top-of-file unit-model comment.
   const amount = valueToCallValue(value);
@@ -187,14 +217,241 @@ async function sendTransferTx(tronWeb, { fromBase58, toBase58, value, multisig =
   return signed.txID || broadcastJson.txid;
 }
 
+// Cache to avoid repeated tre_setAccountCode RPCs for the same address
+// across many test cases that hit the same CREATE2-deployed clone.
+const _autoRegisteredAddresses = new Set();
+
+// --- EVM-predicted → TVM-actual address mapping ---------------------------
+//
+// Java-tron's triggerconstantcontract simulator computes CREATE/CREATE2 result
+// addresses using EVM rules (keccak256(rlp(sender, nonce)) for CREATE,
+// keccak256(0xff||sender||salt||initcodehash) for CREATE2 -- which we patch
+// in OZ Solidity to 0x41 but the simulator still uses 0xff). The actual
+// broadcast through TriggerSmartContract uses TVM rules: CREATE address is
+// keccak256(tx_root_id || sender_address) and CREATE2 uses 0x41.
+//
+// This mismatch breaks the common test pattern:
+//     const addr = await factory.$clone.staticCall(impl);  // EVM-predicted
+//     await factory.$clone(impl);                          // TVM-actual deploy
+//     await signer.sendTransaction({ to: addr, ... });     // FAILS — addr doesn't exist
+//
+// We close the gap by tracking every CREATE in actual-broadcast receipts. For
+// each one we know `caller_address` + the actual deployed address from the
+// internal_transactions array. The simulator's EVM-style prediction is
+// `getCreateAddress(caller, nonce)` where nonce is the caller's per-contract
+// CREATE counter (1, 2, 3, …). Once we've mapped the EVM prediction to the
+// TVM actual, every subsequent send/staticCall that targets the EVM-predicted
+// address gets transparently rewritten to the TVM-actual one.
+//
+// (Solidity-side OZ Clones library is already patched to use 0x41 for
+// CREATE2 prediction inside the contracts; this map covers the off-chain
+// staticCall return path that EVM rules govern in java-tron's simulator.)
+
+const _evmToTvm = new Map();   // lowercased 0x-hex EVM-pred → lowercased 0x-hex TVM-actual
+const _createNonce = new Map(); // tron-hex caller (0x41…) → number (next nonce, starts at 1)
+
+// Queue of recent simulator-returned addresses awaiting pairing with a real
+// CREATE from a receipt. Each entry is { callerTronHex, returnedEvmHex }.
+// We pair by-sequence — the K-th staticCall return from a given contract is
+// the simulator-predicted address for the K-th broadcast CREATE from that
+// same contract. Bounded so a long run can't grow this without limit.
+const _pendingStaticReturns = [];
+const _PENDING_LIMIT = 256;
+
+function recordStaticReturnAddress(callerTronBase58OrHex, returnedAddress) {
+  if (!returnedAddress) return;
+  const callerTronHex = (() => {
+    const s = String(callerTronBase58OrHex || '');
+    if (/^41[0-9a-f]{40}$/i.test(s)) return s.toLowerCase();
+    if (/^0x41[0-9a-f]{40}$/i.test(s)) return s.slice(2).toLowerCase();
+    if (s.startsWith('T') && s.length === 34) {
+      try { return TronWeb.address.toHex(s).toLowerCase(); } catch { return ''; }
+    }
+    return '';
+  })();
+  if (!callerTronHex) return;
+
+  // Returned address from the decoded result is 0x-hex (ethers decoded form).
+  let returnedEvmHex;
+  if (typeof returnedAddress === 'string') {
+    if (/^0x[0-9a-f]{40}$/i.test(returnedAddress)) returnedEvmHex = returnedAddress.toLowerCase();
+    else if (returnedAddress.startsWith('T') && returnedAddress.length === 34) {
+      try { returnedEvmHex = '0x' + TronWeb.address.toHex(returnedAddress).slice(2).toLowerCase(); } catch { return; }
+    }
+  } else if (returnedAddress && typeof returnedAddress === 'object') {
+    const t = returnedAddress.target || returnedAddress.address;
+    if (typeof t === 'string') return recordStaticReturnAddress(callerTronBase58OrHex, t);
+  }
+  if (!returnedEvmHex) return;
+
+  _pendingStaticReturns.push({ callerTronHex, returnedEvmHex });
+  if (_pendingStaticReturns.length > _PENDING_LIMIT) _pendingStaticReturns.shift();
+}
+
+function _normalizeAddrToEvmHex(any) {
+  if (!any) return '';
+  // Unwrap ethers Contract / signer / addressable objects so callers can
+  // pass `clone` (a contract proxy with `.target`) or `signer` (with
+  // `.address`) directly. Mirror the recursion chain that `asAddressString`
+  // uses but inline here to avoid pulling in the ethers-bridge dep.
+  if (typeof any === 'object') {
+    if (typeof any.target === 'string') return _normalizeAddrToEvmHex(any.target);
+    if (typeof any.tronAddress === 'string') return _normalizeAddrToEvmHex(any.tronAddress);
+    if (typeof any.address === 'string') return _normalizeAddrToEvmHex(any.address);
+    return '';
+  }
+  if (typeof any !== 'string') return '';
+  let s = any;
+  // tron-hex `41xxxx…` (no 0x) → 0x-evm
+  if (/^41[0-9a-f]{40}$/i.test(s)) return '0x' + s.slice(2).toLowerCase();
+  // 0x41xxxx… → 0x-evm
+  if (/^0x41[0-9a-f]{40}$/i.test(s)) return '0x' + s.slice(4).toLowerCase();
+  // standard 0x-hex evm
+  if (/^0x[0-9a-f]{40}$/i.test(s)) return s.toLowerCase();
+  // base58 (T…, 34 chars)
+  if (s.startsWith('T') && s.length === 34) {
+    try { return '0x' + TronWeb.address.toHex(s).slice(2).toLowerCase(); } catch { return ''; }
+  }
+  return '';
+}
+
+// Public lookup: given any address form (base58, 0x-evm, tron-hex), return the
+// TVM-actual base58 form if a mapping exists; else null.
+function lookupTvmActualBase58(any) {
+  const k = _normalizeAddrToEvmHex(any);
+  if (!k) return null;
+  const actualEvmHex = _evmToTvm.get(k);
+  if (!actualEvmHex) return null;
+  try { return TronWeb.address.fromHex('41' + actualEvmHex.slice(2)); } catch { return null; }
+}
+
+// Register every CREATE internal_tx from a receipt. Called by the send paths
+// after a successful broadcast.
+function registerCreateMappingsFromReceipt(info) {
+  if (!info) return;
+  const itxs = info.internal_transactions || info.internalTransactions;
+  if (!Array.isArray(itxs) || itxs.length === 0) return;
+  for (const itx of itxs) {
+    // java-tron emits the note as hex-encoded UTF-8. "create" = 637265617465.
+    // The `data` field on a successful CREATE holds the deployed initcode.
+    const note = (itx.note || '').toString().toLowerCase();
+    if (note !== '637265617465') continue;
+    const callerHex = itx.caller_address && itx.caller_address.toLowerCase();
+    const actualHex = itx.transferTo_address && itx.transferTo_address.toLowerCase();
+    if (!callerHex || !actualHex) continue;
+
+    const actualEvm = '0x' + actualHex.slice(2);
+
+    // Pair by sequence (LIFO): the most recent pending static-return from this
+    // same caller is the simulator-predicted address for this broadcast CREATE.
+    // LIFO instead of FIFO survives test failures between staticCall and the
+    // subsequent broadcast — stale entries get pushed deeper rather than
+    // shifting all later pairings off by one. We also evict any older entries
+    // for the same caller after a successful pairing, since their broadcasts
+    // never landed.
+    let paired = null;
+    let pairedIdx = -1;
+    for (let i = _pendingStaticReturns.length - 1; i >= 0; i--) {
+      if (_pendingStaticReturns[i].callerTronHex === callerHex) {
+        paired = _pendingStaticReturns[i];
+        pairedIdx = i;
+        break;
+      }
+    }
+    if (paired) {
+      // Drop the paired entry, then sweep older same-caller entries (stale
+      // staticCalls whose broadcasts never landed) without disturbing pending
+      // entries from other callers.
+      _pendingStaticReturns.splice(pairedIdx, 1);
+      for (let i = pairedIdx - 1; i >= 0; i--) {
+        if (_pendingStaticReturns[i].callerTronHex === callerHex) {
+          _pendingStaticReturns.splice(i, 1);
+        }
+      }
+    }
+    if (paired) {
+      _evmToTvm.set(paired.returnedEvmHex, actualEvm.toLowerCase());
+    }
+  }
+}
+
+// One-time access to ethers so this module doesn't take a hard dep on it.
+let ethersV6;
+function setEthers(e) { ethersV6 = e; }
+
+// Check if `toBase58` has CodeStore bytecode but no ContractStore entry,
+// and if so, force-register it via tre_setAccountCode. Returns true if a
+// retry of the original triggersmartcontract is warranted.
+//
+// Only attempts recovery when the prior trigger response indicates the
+// canonical "no contract" CONTRACT_VALIDATE_ERROR — anything else is left
+// to surface as the caller's error.
+async function maybeAutoRegisterContract(tronWeb, toBase58, triggerJson) {
+  const code = triggerJson && triggerJson.result && triggerJson.result.code;
+  const messageHex = triggerJson && triggerJson.result && triggerJson.result.message;
+  if (code !== 'CONTRACT_VALIDATE_ERROR' || !messageHex) return false;
+  let msg = '';
+  try { msg = Buffer.from(messageHex, 'hex').toString('utf8'); } catch { /* */ }
+  if (!/No contract or not a valid smart contract/i.test(msg)) return false;
+  if (_autoRegisteredAddresses.has(toBase58)) return false; // already tried, don't loop
+
+  const base = tronWeb.fullNode.host.replace(/\/$/, '');
+  const hexAddr = '0x' + TronWeb.address.toHex(toBase58).slice(2);
+  let bytecode;
+  try {
+    const codeResp = await fetch(base + '/jsonrpc', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', method: 'eth_getCode', params: [hexAddr, 'latest'], id: 1 }),
+    });
+    const codeJson = await codeResp.json();
+    bytecode = codeJson.result;
+  } catch {
+    return false;
+  }
+  if (!bytecode || bytecode === '0x' || bytecode === '0x0') return false;
+
+  _autoRegisteredAddresses.add(toBase58);
+  const r = await rpcCall(tronWeb, 'tre_setAccountCode', [toBase58, bytecode]);
+  return r && r.result === true;
+}
+
 async function rpcCall(tronWeb, method, params = []) {
   const url = tronWeb.fullNode.host.replace(/\/$/, '') + '/tre';
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
-  });
-  return res.json();
+  const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method, params });
+  // Single retry on a connection-level error ("fetch failed", TypeError,
+  // AbortError). java-tron under G1GC with -Xmx2g can stop-the-world for
+  // 50-200 ms late in long parallel runs as the chain state grows; a
+  // pause that exceeds node's default fetch keep-alive timeout surfaces
+  // as a TypeError here rather than as a server-side error code. One
+  // 100 ms backoff catches those without masking real RPC failures
+  // (which come back as `res.json()` with `error: {...}` and aren't
+  // caught here).
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    });
+    return res.json();
+  } catch (e) {
+    if (!isTransientFetchError(e)) throw e;
+    await new Promise(r => setTimeout(r, 100));
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    });
+    return res.json();
+  }
+}
+
+function isTransientFetchError(e) {
+  if (!e) return false;
+  const name = e.name || (e.constructor && e.constructor.name);
+  if (name === 'AbortError' || name === 'TypeError') return true;
+  const msg = String(e.message || e);
+  return /fetch failed|socket hang up|ECONNRESET|ECONNREFUSED|ETIMEDOUT|UND_ERR/i.test(msg);
 }
 
 async function callOrFalse(tronWeb, method, params = []) {
@@ -281,6 +538,10 @@ module.exports = {
   rpcCall,
   sendCallTx,
   sendTransferTx,
+  lookupTvmActualBase58,
+  registerCreateMappingsFromReceipt,
+  recordStaticReturnAddress,
+  setEthers,
   WEI_PER_SUN,
   weiToSun,
   valueToCallValue,

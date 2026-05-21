@@ -151,6 +151,9 @@ function makeSigner(hre, privateKey, knownReceipts, waitForReceipt) {
     // the transfer path and synthesize an empty info; the call
     // path still polls because it needs receipt.result/logs.
     const info = hasDataField ? await waitForReceipt(tronWeb, txId) : null;
+    // Hook for EVM-pred → TVM-actual address mapping: record any CREATE
+    // internal_txs from this receipt so subsequent `to:` lookups can rewrite.
+    try { require('./cheatcodes').registerCreateMappingsFromReceipt(info); } catch { /* */ }
     // Receipt-result semantics differ between TransferContract (plain
     // TRX) and TriggerSmartContract (any `data` field, even '0x').
     // Only the latter populates `info.receipt.result` with
@@ -323,6 +326,8 @@ function makeSigner(hre, privateKey, knownReceipts, waitForReceipt) {
 function toBase58(value) {
   if (!value) return value;
   if (typeof value === 'object' && typeof value.tronAddress === 'string') return value.tronAddress;
+  // ethers v6 contract proxies expose `.target` instead of `.address`.
+  if (typeof value === 'object' && typeof value.target === 'string') return toBase58(value.target);
   if (typeof value === 'object' && typeof value.address === 'string') return toBase58(value.address);
   if (typeof value !== 'string') return value;
   if (value.startsWith('T') && value.length === 34) return value;

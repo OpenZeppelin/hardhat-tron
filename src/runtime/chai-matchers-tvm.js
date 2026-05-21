@@ -29,6 +29,7 @@
 
 const { ethers: ethersV6 } = require('ethers');
 const { TronWeb } = require('tronweb');
+const { lookupTvmActualBase58 } = require('./cheatcodes');
 
 const ERC20_TRANSFER_TOPIC = ethersV6.id('Transfer(address,address,uint256)');
 // Unit model: 1 wei == 1 sun pass-through (see plugin/cheatcodes.js
@@ -55,6 +56,18 @@ function asAddressString(value) {
 function normalizeAddrLower(value) {
   let s = asAddressString(value);
   if (typeof s !== 'string') return s;
+  // EVM-pred → TVM-actual rewrite. If the user passed an EVM-simulator
+  // address (e.g. a Clones `instance.target` returned by staticCall) and
+  // we've since seen the broadcast CREATE that maps it to a TVM-actual
+  // address, normalize to the TVM-actual one so internal_tx ether-balance
+  // accounting matches. See cheatcodes.js _evmToTvm.
+  try {
+    const remappedBase58 = lookupTvmActualBase58(s);
+    if (remappedBase58) {
+      const hex21 = TronWeb.address.toHex(remappedBase58);
+      return '0x' + hex21.slice(2).toLowerCase();
+    }
+  } catch { /* */ }
   if (s.startsWith('T') && s.length === 34) {
     const hex21 = TronWeb.address.toHex(s);
     return '0x' + hex21.slice(2).toLowerCase();
