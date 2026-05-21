@@ -129,7 +129,11 @@ function makeSigner(hre, privateKey, deps = {}) {
     const info = hasDataField && waitForReceipt ? await waitForReceipt(tronWeb, txId) : null;
     // Hook for EVM-pred → TVM-actual address mapping: record any CREATE
     // internal_txs from this receipt so subsequent `to:` lookups can rewrite.
-    try { require('./cheatcodes').registerCreateMappingsFromReceipt(info); } catch { /* */ }
+    try {
+      require('./cheatcodes').registerCreateMappingsFromReceipt(info);
+    } catch {
+      /* */
+    }
     // Receipt-result semantics differ between TransferContract (plain
     // TRX) and TriggerSmartContract (any `data` field, even '0x'):
     // only the latter populates `info.receipt.result`. Falling back

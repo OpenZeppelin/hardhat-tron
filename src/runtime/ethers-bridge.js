@@ -787,7 +787,9 @@ async function staticCallWithRevertData(fnAbi, tronContract, tronWeb, normalized
               : undefined;
         if (addr) recordStaticReturnAddress(contractAddrForCall, addr);
       }
-    } catch { /* */ }
+    } catch {
+      /* */
+    }
     return finalDecoded;
   }
 
@@ -836,7 +838,9 @@ async function staticCallWithRevertData(fnAbi, tronContract, tronWeb, normalized
         e.data = synthSelector;
         throw e;
       }
-    } catch (e) { if (e && e.data) throw e; /* swallow getContract errors */ }
+    } catch (e) {
+      if (e && e.data) throw e; /* swallow getContract errors */
+    }
   }
 
   const err = new Error(`call reverted (data=${raw})`);
@@ -869,7 +873,11 @@ function hasTvmUnsupportedPrecompileArg(args, inputs) {
     if (v.startsWith('0x') && v.length === 42) {
       hex = v.toLowerCase();
     } else if (v.startsWith('T') && v.length === 34) {
-      try { hex = '0x' + TronWeb.address.toHex(v).slice(2).toLowerCase(); } catch { continue; }
+      try {
+        hex = '0x' + TronWeb.address.toHex(v).slice(2).toLowerCase();
+      } catch {
+        continue;
+      }
     } else {
       continue;
     }
@@ -1055,7 +1063,9 @@ async function buildRevertErrorWithSim(txId, info, fnAbi, tronContract, tronWeb,
         err.data = '0xb06ebf3d'; // FailedDeployment()
         return err;
       }
-    } catch { /* */ }
+    } catch {
+      /* */
+    }
   }
   return err;
 }
@@ -1235,7 +1245,9 @@ function makeMethod(fnAbi, tronContract, tronWeb, hre) {
               e.data = synthSelector;
               throw e;
             }
-          } catch (e) { if (e && e.data) throw e; /* swallow code-fetch errors */ }
+          } catch (e) {
+            if (e && e.data) throw e; /* swallow code-fetch errors */
+          }
         }
         // Re-throw whatever sim got us; sim's err is usually more useful
         // than TronWeb's "energy not enough".
@@ -2501,7 +2513,9 @@ function installMochaTimeoutDefault() {
   const tryInstall = () => {
     if (typeof global.beforeEach === 'function' && typeof global.it === 'function') {
       installMochaTimeoutDefault._installed = true;
-      global.beforeEach(function () { this.timeout(TIMEOUT_MS); });
+      global.beforeEach(function () {
+        this.timeout(TIMEOUT_MS);
+      });
       return;
     }
     if (attempts++ < 100) setImmediate(tryInstall);

@@ -68,7 +68,9 @@ function normalizeAddrLower(value) {
       const hex21 = TronWeb.address.toHex(remappedBase58);
       return '0x' + hex21.slice(2).toLowerCase();
     }
-  } catch { /* */ }
+  } catch {
+    /* */
+  }
   if (s.startsWith('T') && s.length === 34) {
     const hex21 = TronWeb.address.toHex(s);
     return '0x' + hex21.slice(2).toLowerCase();

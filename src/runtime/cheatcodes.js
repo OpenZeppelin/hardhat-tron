@@ -310,7 +310,7 @@ async function sendTransferTx(tronWeb, { fromBase58, toBase58, value, multisig =
 // contracts; this map covers the off-chain staticCall-return path that
 // EVM rules govern in java-tron's simulator.)
 
-const _evmToTvm = new Map();      // lowercased 0x-hex EVM-pred → lowercased 0x-hex TVM-actual
+const _evmToTvm = new Map(); // lowercased 0x-hex EVM-pred → lowercased 0x-hex TVM-actual
 
 // Queue of recent simulator-returned addresses awaiting pairing with a
 // real CREATE from a receipt. Each entry is { callerTronHex,
@@ -325,7 +325,11 @@ function recordStaticReturnAddress(callerTronBase58OrHex, returnedAddress) {
     if (/^41[0-9a-f]{40}$/i.test(s)) return s.toLowerCase();
     if (/^0x41[0-9a-f]{40}$/i.test(s)) return s.slice(2).toLowerCase();
     if (s.startsWith('T') && s.length === 34) {
-      try { return TronWeb.address.toHex(s).toLowerCase(); } catch { return ''; }
+      try {
+        return TronWeb.address.toHex(s).toLowerCase();
+      } catch {
+        return '';
+      }
     }
     return '';
   })();
@@ -335,7 +339,11 @@ function recordStaticReturnAddress(callerTronBase58OrHex, returnedAddress) {
   if (typeof returnedAddress === 'string') {
     if (/^0x[0-9a-f]{40}$/i.test(returnedAddress)) returnedEvmHex = returnedAddress.toLowerCase();
     else if (returnedAddress.startsWith('T') && returnedAddress.length === 34) {
-      try { returnedEvmHex = '0x' + TronWeb.address.toHex(returnedAddress).slice(2).toLowerCase(); } catch { return; }
+      try {
+        returnedEvmHex = '0x' + TronWeb.address.toHex(returnedAddress).slice(2).toLowerCase();
+      } catch {
+        return;
+      }
     }
   } else if (returnedAddress && typeof returnedAddress === 'object') {
     const t = returnedAddress.target || returnedAddress.address;
@@ -362,7 +370,11 @@ function _normalizeAddrToEvmHex(any) {
   if (/^0x41[0-9a-f]{40}$/i.test(s)) return '0x' + s.slice(4).toLowerCase();
   if (/^0x[0-9a-f]{40}$/i.test(s)) return s.toLowerCase();
   if (s.startsWith('T') && s.length === 34) {
-    try { return '0x' + TronWeb.address.toHex(s).slice(2).toLowerCase(); } catch { return ''; }
+    try {
+      return '0x' + TronWeb.address.toHex(s).slice(2).toLowerCase();
+    } catch {
+      return '';
+    }
   }
   return '';
 }
@@ -376,7 +388,11 @@ function lookupTvmActualBase58(any) {
   if (!k) return null;
   const actualEvmHex = _evmToTvm.get(k);
   if (!actualEvmHex) return null;
-  try { return TronWeb.address.fromHex('41' + actualEvmHex.slice(2)); } catch { return null; }
+  try {
+    return TronWeb.address.fromHex('41' + actualEvmHex.slice(2));
+  } catch {
+    return null;
+  }
 }
 
 // Register every CREATE internal_tx from a receipt. Called by the bridge
@@ -425,7 +441,9 @@ function registerCreateMappingsFromReceipt(info) {
 // One-time access to ethers so this module doesn't take a hard dep on
 // it (sibling-chain spikes load cheatcodes without ethers).
 let ethersV6;
-function setEthers(e) { ethersV6 = e; }
+function setEthers(e) {
+  ethersV6 = e;
+}
 
 // -- CONTRACT_VALIDATE_ERROR auto-recovery --------------------------
 //
@@ -448,7 +466,11 @@ async function maybeAutoRegisterContract(tronWeb, toBase58, triggerJson) {
   const messageHex = triggerJson && triggerJson.result && triggerJson.result.message;
   if (code !== 'CONTRACT_VALIDATE_ERROR' || !messageHex) return false;
   let msg = '';
-  try { msg = Buffer.from(messageHex, 'hex').toString('utf8'); } catch { /* */ }
+  try {
+    msg = Buffer.from(messageHex, 'hex').toString('utf8');
+  } catch {
+    /* */
+  }
   if (!/No contract or not a valid smart contract/i.test(msg)) return false;
   if (_autoRegisteredAddresses.has(toBase58)) return false; // already tried, don't loop
 
