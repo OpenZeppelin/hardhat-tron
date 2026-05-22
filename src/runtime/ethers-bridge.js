@@ -2187,14 +2187,22 @@ async function loadFixture(fn) {
 function patchNetworkHelpers(hre) {
   const tw = () => hre.tre.makeTronWeb().tronWeb;
 
+  // Resolve from the user's hardhat project root, not from this
+  // package's location. When `@openzeppelin/hardhat-tron` is consumed
+  // via a `file:` dependency (symlink in node_modules), Node walks up
+  // from the real path of this file looking for `node_modules`, which
+  // misses `hardhat-network-helpers` — it's only installed in the
+  // consumer project. Without this, every `tryPatch` MODULE_NOT_FOUNDs
+  // silently and the upstream `loadFixture`/`takeSnapshot`/etc. run
+  // unpatched, surfacing as `OnlyHardhatNetworkError` mid-test.
   function tryPatch(modulePath, exportName, fn) {
-    let mod;
+    let resolved;
     try {
-      mod = require(modulePath);
+      resolved = require.resolve(modulePath, { paths: [hre.config.paths.root] });
     } catch {
-      return; // not installed in this project
+      return; // not installed in the consumer project
     }
-    mod[exportName] = fn;
+    require(resolved)[exportName] = fn;
   }
 
   // --- loadFixture ---
