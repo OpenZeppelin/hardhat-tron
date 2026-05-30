@@ -17,7 +17,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 TEMP="tron-tvm-spike-build-$$"
-OUT="plugin/tre-fork/FullNode.jar"
+OUT="docker/FullNode.jar"
 
 cleanup() {
   docker rm -f "$TEMP" >/dev/null 2>&1 || true
@@ -30,7 +30,7 @@ docker run -d --name "$TEMP" --entrypoint sleep tronbox/tre:dev infinity >/dev/n
 
 echo "→ Compiling patch sources..."
 docker exec "$TEMP" rm -rf /tmp/src /tmp/build
-docker cp plugin/tre-fork/src "$TEMP:/tmp/src"
+docker cp docker/src "$TEMP:/tmp/src"
 docker exec "$TEMP" sh -c '
   mkdir -p /tmp/build
   javac -encoding UTF-8 -classpath /tron/FullNode/FullNode.jar -d /tmp/build \
