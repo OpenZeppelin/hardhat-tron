@@ -83,10 +83,11 @@ function countArtifacts(dir) {
 
 // Convert a batch definition (dirs + extraLeaves) into the glob
 // array consumed by `tre.compiler.include`. Auto-pairs each
-// `contracts/<x>` with `contracts/exposed/<x>` so the wrappers
+// `contracts/<x>` with `contracts-exposed/<x>` so the wrappers
 // compile in the same pass as their originals — the
-// `hardhat-exposed` plugin's layout convention, expressed
-// declaratively here.
+// `hardhat-exposed` plugin's layout convention (a top-level
+// `contracts-exposed/` tree, never under `contracts/`; the source
+// resolver scans it as an extra root). Expressed declaratively here.
 function batchGlobs(batch) {
   if (Array.isArray(batch.include) && batch.include.length) {
     return batch.include;
@@ -94,8 +95,8 @@ function batchGlobs(batch) {
   const out = [];
   for (const d of batch.dirs || []) {
     out.push(`${d}/**/*.sol`);
-    if (d.startsWith('contracts/') && !d.startsWith('contracts/exposed')) {
-      out.push(`${d.replace(/^contracts\//, 'contracts/exposed/')}/**/*.sol`);
+    if (d.startsWith('contracts/') && !d.startsWith('contracts-exposed')) {
+      out.push(`${d.replace(/^contracts\//, 'contracts-exposed/')}/**/*.sol`);
     }
   }
   for (const leaf of batch.extraLeaves || []) {
