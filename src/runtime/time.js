@@ -43,7 +43,12 @@ async function mine(tronWeb, blocks = 1) {
 
 async function latestBlock(tronWeb) {
   const b = await tronWeb.trx.getCurrentBlock();
-  return b.block_header.raw_data.number;
+  // At genesis (block 0), java-tron's proto3 encoding omits the
+  // zero-valued `number` field, so `raw_data.number` is `undefined`.
+  // Coerce to 0 — block 0 is a valid height, and callers (ethers
+  // `getBlockNumber`, `mineUpTo`, the time helpers) need a number, not
+  // `undefined` (which propagates as `NaN` through arithmetic).
+  return b.block_header.raw_data.number ?? 0;
 }
 
 async function latest(tronWeb) {

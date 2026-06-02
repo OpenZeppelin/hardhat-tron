@@ -17,6 +17,7 @@
 //
 
 const path = require('node:path');
+const fs = require('node:fs');
 const micromatch = require('micromatch');
 const { getAllFilesMatching } = require('hardhat/internal/util/fs-utils');
 
@@ -33,7 +34,7 @@ async function resolveSourcePaths({ sourcePath }, hre, runSuper) {
   const root = hre.config.paths.root;
   const sources = sourcePath ?? hre.config.paths.sources;
 
-  return getAllFilesMatching(sources, (abs) => {
+  const matches = (abs) => {
     if (!abs.endsWith('.sol')) return false;
     // Match globs against the project-relative path, not the
     // absolute one -- consumers write `contracts/**/*.sol`, not
@@ -42,7 +43,30 @@ async function resolveSourcePaths({ sourcePath }, hre, runSuper) {
     if (hasInclude && !micromatch.isMatch(rel, cfg.include)) return false;
     if (hasExclude && micromatch.isMatch(rel, cfg.exclude)) return false;
     return true;
-  });
+  };
+
+  // Scan `paths.sources` (contracts/) PLUS the top-level
+  // `contracts-exposed/` wrapper tree. hardhat-exposed writes its
+  // `$<X>` wrappers there (matching the bridge's `_artifactRoots`).
+  // That tree lives OUTSIDE paths.sources, so Hardhat's default
+  // discovery never walks it; without this the wrappers never compile.
+  // Hardhat names sources by their root-relative path, so wrappers land
+  // in `artifacts/contracts-exposed/...` exactly where the bridge looks.
+  const roots = [sources];
+  const exposed = path.join(root, 'contracts-exposed');
+  if (fs.existsSync(exposed)) roots.push(exposed);
+
+  const seen = new Set();
+  const out = [];
+  for (const r of roots) {
+    for (const abs of await getAllFilesMatching(r, matches)) {
+      if (!seen.has(abs)) {
+        seen.add(abs);
+        out.push(abs);
+      }
+    }
+  }
+  return out;
 }
 
 module.exports = { resolveSourcePaths };
