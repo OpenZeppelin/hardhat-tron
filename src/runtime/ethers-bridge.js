@@ -239,6 +239,50 @@ const stubProvider = {
     }
     return '0x' + '0'.repeat(64);
   },
+  // ethers v6 routes `view`/`pure` Contract methods (and explicit
+  // `.staticCall`) through `runner.call(tx)`. The facade path
+  // (deployContract / getContractAt) intercepts these itself, but a native
+  // `new ethers.Contract(addr, abi, provider)` — e.g. the test helper
+  // `forceDeployCode` layered over `setCode` — calls straight through to here.
+  // Forward the raw calldata to `/wallet/triggerconstantcontract` and return
+  // the raw result hex; ethers performs the ABI decode. Mirrors estimateGas.
+  async call(tx) {
+    const tw = this._tw();
+    if (!tw) return '0x';
+    const toAddr = lookupTvmActualBase58(tx.to) || signersMod.toBase58(tx.to);
+    const fromAddr = tx.from ? lookupTvmActualBase58(tx.from) || signersMod.toBase58(tx.from) : toAddr;
+    const data = typeof tx.data === 'string' && tx.data.startsWith('0x') ? tx.data.slice(2) : tx.data || '';
+    const body = {
+      owner_address: TronWeb.address.toHex(fromAddr),
+      contract_address: TronWeb.address.toHex(toAddr),
+      data,
+      call_value: tx.value ? Number(tx.value) : 0,
+      visible: false,
+    };
+    const url = tw.fullNode.host.replace(/\/$/, '') + '/wallet/triggerconstantcontract';
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+      .then((r) => r.json())
+      .catch(() => null);
+    // A successful constant call reports `result.result === true`; a revert
+    // sets `result.code`/`result.message` and puts the revert bytes in
+    // `constant_result[0]` (same detection as staticCallWithRevertData).
+    const reverted = res && res.result && (res.result.code || res.result.message);
+    const raw = res && res.constant_result && res.constant_result[0] ? '0x' + res.constant_result[0] : '0x';
+    if (reverted) {
+      // Surface revert data on a CALL_EXCEPTION so ethers / chai-matchers can
+      // decode it (revertedWith / revertedWithCustomError) instead of
+      // mis-decoding a 4-byte error selector as return data.
+      const err = new Error('execution reverted (TVM constant call)');
+      err.code = 'CALL_EXCEPTION';
+      err.data = raw;
+      throw err;
+    }
+    return raw;
+  },
 };
 
 // -- Address conversion ---------------------------------------------

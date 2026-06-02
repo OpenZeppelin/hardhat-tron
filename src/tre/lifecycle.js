@@ -139,6 +139,13 @@ async function waitForReady(url, deadlineMs, log) {
 async function ensureUp(cfg, networkUrl, log = () => {}) {
   if (await isReachable(networkUrl)) {
     log(`  TRE already reachable at ${networkUrl} (skipping spawn)`);
+    // We didn't spawn it, but a parallel-test runner (own container + TRE_URL)
+    // or a manual `tre:up` may have left the chain at genesis (block 0), where
+    // java-tron's proto3 omits the zero `number` field and the first
+    // CreateSmartContract deploy crashes in getCurrentRefBlockParams. Prime it
+    // the same way as the spawn path. Best-effort + idempotent: on an
+    // already-advanced chain this just mines one extra (harmless) block.
+    await primeGenesis(networkUrl, log);
     return { spawned: false, name: null, url: networkUrl };
   }
 
