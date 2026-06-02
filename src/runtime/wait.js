@@ -6,7 +6,7 @@
 // `getUnconfirmedTransactionInfo` first and only fall back to the
 // solidified view as a hedge for public networks.
 
-const { mine } = require('./cheatcodes');
+const { mine, isTransientFetchError } = require('./cheatcodes');
 
 // JSON parser that preserves integer precision above 2^53. TVM's
 // transaction-info response embeds `callValueInfo[*].callValue` (and
@@ -46,12 +46,29 @@ async function _getInfoBigSafe(tronWeb, txId, endpoint) {
   // TronWeb's JSON parsing (lossy on large integers).
   const base = tronWeb.fullNode.host.replace(/\/$/, '');
   const url = base + endpoint;
-  const resp = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ value: txId }),
-  });
-  const text = await resp.text();
+  const fetchText = async () => {
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value: txId }),
+    });
+    return resp.text();
+  };
+  // Single retry on a connection-level error ("fetch failed", "other side
+  // closed", ECONNRESET, …) on EITHER the request or the body read. java-tron
+  // under G1GC with -Xmx2g can stop-the-world for 50–200 ms late in long
+  // parallel runs; a pause exceeding the HTTP keep-alive timeout drops the
+  // socket and surfaces here. Without a retry, one dropped poll fails the test
+  // — and because every later fixture's waitForReceipt hits the same node, it
+  // cascades the rest of the worker. Mirrors rpcCall's retry (cheatcodes.js).
+  let text;
+  try {
+    text = await fetchText();
+  } catch (e) {
+    if (!isTransientFetchError(e)) throw e;
+    await new Promise((r) => setTimeout(r, 100));
+    text = await fetchText();
+  }
   if (!text) return null;
   return jsonParseBigSafe(text);
 }

@@ -126,10 +126,27 @@ const stubProvider = {
     const addr = remapped || signersMod.toBase58(address);
     try {
       const info = await tw.trx.getContract(addr);
-      return info && info.bytecode ? '0x' + info.bytecode : '0x';
+      if (info && info.bytecode) return '0x' + info.bytecode;
     } catch {
-      return '0x';
+      /* fall through to eth_getCode */
     }
+    // `getContract` reads ContractStore, which misses CREATE2-opcode
+    // deployments (e.g. RelayedCall's assembly-`create2` relayer) — those
+    // live in CodeStore. Fall back to `eth_getCode` on `/jsonrpc`, which
+    // reads CodeStore. Same endpoint maybeAutoRegisterContract uses.
+    try {
+      const base = tw.fullNode.host.replace(/\/$/, '');
+      const hexAddr = '0x' + TronWeb.address.toHex(addr).slice(2);
+      const res = await fetch(base + '/jsonrpc', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', method: 'eth_getCode', params: [hexAddr, 'latest'], id: 1 }),
+      }).then((r) => r.json());
+      if (res && typeof res.result === 'string' && res.result !== '0x' && res.result !== '0x0') return res.result;
+    } catch {
+      /* */
+    }
+    return '0x';
   },
   async getBalance(address) {
     const tw = this._tw();
@@ -217,25 +234,27 @@ const stubProvider = {
   async getStorage(address, slot) {
     const tw = this._tw();
     if (!tw) return '0x' + '0'.repeat(64);
-    const addr = signersMod.toBase58(address);
-    const slotHex = typeof slot === 'bigint' ? ethersV6.toBeHex(slot, 32) : slot;
-    const rpc = tw.fullNode.host.replace(/\/$/, '') + '/tre';
-    const res = await fetch(rpc, {
+    // Read the EXACT slot via `eth_getStorageAt` on `/jsonrpc`. The prior
+    // `/tre debug_storageRangeAt` approach returned `Object.values(storage)[0]`
+    // — the FIRST slot the node yields, NOT the requested one (java-tron's
+    // storageRangeAt does not filter to the key) — so ERC-1967 slot reads
+    // (proxy implementation/admin) came back as slot 0 (the impl's `value`).
+    // `eth_getStorageAt` is exact. Also apply the EVM-pred → TVM-actual remap
+    // (matches getCode/getBalance) for predicted-address reads (clones, etc.).
+    const remapped = lookupTvmActualBase58(address);
+    const addr = remapped || signersMod.toBase58(address);
+    const slotHex = ethersV6.toBeHex(slot, 32);
+    const base = tw.fullNode.host.replace(/\/$/, '');
+    const hexAddr = '0x' + TronWeb.address.toHex(addr).slice(2);
+    const res = await fetch(base + '/jsonrpc', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'debug_storageRangeAt',
-        params: [0, 0, addr, slotHex, 1],
-      }),
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getStorageAt', params: [hexAddr, slotHex, 'latest'] }),
     })
       .then((r) => r.json())
       .catch(() => null);
-    const storage = res && res.result && res.result.storage;
-    if (storage) {
-      const entry = Object.values(storage)[0];
-      if (entry && entry.value) return '0x' + entry.value;
+    if (res && typeof res.result === 'string' && res.result !== '0x') {
+      return ethersV6.zeroPadValue(res.result, 32);
     }
     return '0x' + '0'.repeat(64);
   },
