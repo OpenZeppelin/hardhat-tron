@@ -497,6 +497,7 @@ async function maybeAutoRegisterContract(tronWeb, toBase58, triggerJson) {
 
 module.exports = {
   rpcCall,
+  isTransientFetchError,
   callOrFalse,
   mine,
   setBlockTime,
