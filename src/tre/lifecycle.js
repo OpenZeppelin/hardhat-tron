@@ -67,6 +67,22 @@ function containerExists(name) {
   return r.status === 0 && r.stdout.trim() === name;
 }
 
+// Mine one block so the chain is past genesis before any deploy. Best-effort:
+// a failure here (e.g. stock image without the tre_mine cheatcode) is logged,
+// not fatal. See the call site in ensureUp for why this is required.
+async function primeGenesis(networkUrl, log) {
+  try {
+    const res = await fetch(networkUrl.replace(/\/jsonrpc$/, '/tre'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tre_mine', params: [] }),
+    }).then((r) => r.json());
+    if (res && res.error) log(`  warning: genesis prime (tre_mine) failed: ${JSON.stringify(res.error)}`);
+  } catch (e) {
+    log(`  warning: genesis prime (tre_mine) failed: ${e.message}`);
+  }
+}
+
 // JVM tuning string -- required for snapshot/revert stability. See
 // the header comment for why ParallelGC is unsafe under our workload.
 const JAVA_TOOL_OPTIONS =
@@ -148,6 +164,11 @@ async function ensureUp(cfg, networkUrl, log = () => {}) {
 
   try {
     await waitForReady(networkUrl, cfg.readinessTimeoutMs, log);
+    // Advance one block past genesis. At block 0 java-tron's proto3 encoding
+    // omits the zero-valued block number, so TronWeb's getCurrentRefBlockParams
+    // throws ("Cannot read properties of undefined") on the first
+    // CreateSmartContract deploy. Mining one block sidesteps it.
+    await primeGenesis(networkUrl, log);
   } catch (e) {
     // Surface logs from the container to help the user diagnose
     // startup failures before we kill it.

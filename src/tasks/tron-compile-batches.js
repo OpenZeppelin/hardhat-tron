@@ -86,8 +86,8 @@ function countArtifacts(dir) {
 // `contracts/<x>` with `contracts-exposed/<x>` so the wrappers
 // compile in the same pass as their originals — the
 // `hardhat-exposed` plugin's layout convention (a top-level
-// `contracts-exposed/` tree, never under `contracts/`), expressed
-// declaratively here.
+// `contracts-exposed/` tree, never under `contracts/`; the source
+// resolver scans it as an extra root). Expressed declaratively here.
 function batchGlobs(batch) {
   if (Array.isArray(batch.include) && batch.include.length) {
     return batch.include;
