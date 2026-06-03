@@ -153,8 +153,23 @@ const stubProvider = {
     if (!tw) return 0n;
     const remapped = lookupTvmActualBase58(address);
     const addr = remapped || signersMod.toBase58(address);
-    const sun = await tw.trx.getBalance(addr).catch(() => 0);
-    return BigInt(sun);
+    // Read the balance BigInt-safely. TronWeb's `trx.getBalance` parses the
+    // account JSON with lossy `JSON.parse`, quantizing any balance above 2^53 to
+    // the nearest IEEE-754 double (~1024-sun ULP at a ~5e18 balance) — so a small
+    // balance delta (e.g. a 10-sun refund landing on a pre-funded signer) reads as
+    // 0 even though the transfer happened. Pull `balance` out of the raw
+    // /wallet/getaccount text so no precision is lost. (Same >2^53 hazard the
+    // wait.js receipt parser already avoids.)
+    const base = tw.fullNode.host.replace(/\/$/, '');
+    const text = await fetch(base + '/wallet/getaccount', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ address: TronWeb.address.toHex(addr), visible: false }),
+    })
+      .then((r) => r.text())
+      .catch(() => '');
+    const m = text && text.match(/"balance"\s*:\s*(\d+)/);
+    return m ? BigInt(m[1]) : 0n;
   },
   async getBlockNumber() {
     const tw = this._tw();
