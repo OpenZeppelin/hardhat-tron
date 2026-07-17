@@ -87,6 +87,19 @@ export interface CheatcodeResult<T = unknown> {
 
 export interface TreRuntime {
   makeTronWeb(): { tronWeb: TronWeb; address: string };
+  /**
+   * A stable identifier for the specific TRE node instance the active network
+   * points at. When this plugin launched the TRE container, the id is derived
+   * from the container's own identity (docker container id + `StartedAt`),
+   * so every fresh boot — and every restart — yields a distinct value even
+   * when the chain is otherwise deterministic. For an externally-provided TRE
+   * (one this plugin did not launch), the id falls back to the genesis block
+   * hash; because a TRE booted from identical config produces an identical
+   * genesis block, two deterministic restarts of an external TRE will share an
+   * id. Let this plugin manage the container lifecycle if you need a
+   * guaranteed-fresh id per restart.
+   */
+  instanceId(): Promise<string>;
   rpcCall(tronWeb: TronWeb, method: string, params?: unknown[]): Promise<unknown>;
   mine(tronWeb: TronWeb): Promise<CheatcodeResult<unknown>>;
   setBlockTime(tronWeb: TronWeb, seconds: number): Promise<CheatcodeResult<unknown>>;

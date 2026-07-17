@@ -42,16 +42,23 @@ const cheatcodes = require('./runtime/cheatcodes');
 const deploy = require('./runtime/deploy');
 const wait = require('./runtime/wait');
 const artifacts = require('./runtime/artifacts');
+const instanceIds = require('./runtime/instance-id');
 
 // Side-effect import: registers an `extendEnvironment` hook that
 // overrides `hre.ethers.deployContract` so unmodified ethers-based
 // tests can deploy through TronWeb.
 require('./runtime/ethers-bridge');
 
+// Side-effect import: registers an `extendProvider` hook that answers
+// `hardhat_metadata` on tron-typed networks so upgrades tooling keys its
+// development manifests by TRE instance. See runtime/metadata-provider.js.
+require('./runtime/metadata-provider');
+
 extendEnvironment((hre) => {
   hre.tre = hre.tre || {};
   Object.assign(hre.tre, {
     makeTronWeb: () => treWeb.makeTronWeb(hre),
+    instanceId: () => instanceIds.instanceId(hre),
     rpcCall: cheatcodes.rpcCall,
     mine: cheatcodes.mine,
     setBlockTime: cheatcodes.setBlockTime,
