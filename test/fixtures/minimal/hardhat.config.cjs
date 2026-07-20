@@ -4,7 +4,14 @@
 // loaded via a relative require so the fixture does not need its
 // own `node_modules` — tests run against the workspace root's
 // hardhat and the plugin source under development.
+//
+// hardhat-ethers must be required BEFORE the plugin: it registers the
+// `extendEnvironment` hook that provides `hre.ethers`, which the plugin's
+// bridge then decorates for TronWeb. Order matters — the plugin assumes
+// `hre.ethers` already exists when its own hook runs.
 
+require('@nomicfoundation/hardhat-ethers');
+require('@nomicfoundation/hardhat-chai-matchers');
 require('../../../src');
 
 module.exports = {
@@ -14,9 +21,11 @@ module.exports = {
       url: process.env.TRE_URL || 'http://127.0.0.1:9090/jsonrpc',
       tron: true,
       accounts: [
-        // Well-known test key — Hardhat's account 0. Tests that
-        // need a different signer override via TRE_PRIVATE_KEY.
-        process.env.TRE_PRIVATE_KEY || '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
+        // Well-known TRE dev key — funded account #0 in the tronbox/tre
+        // image's genesis. (The image funds its own default accounts, not
+        // ones derived from the displayed mnemonic.) Tests that need a
+        // different signer override via TRE_PRIVATE_KEY.
+        process.env.TRE_PRIVATE_KEY || '0xdd23ca549a97cb330b011aebb674730df8b14acaee42d211ab45692699ab8ba5',
       ],
     },
   },
