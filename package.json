@@ -29,7 +29,7 @@
     "hardhat": "^2.22.0"
   },
   "dependencies": {
-    "@openzeppelin/tron-runtime": "file:vendor/openzeppelin-tron-runtime-0.1.0-alpha.0.tgz",
+    "@openzeppelin/tron-runtime": "0.1.0-alpha.1",
     "micromatch": "^4.0.8",
     "solc": "^0.8.26",
     "tronweb": "^6.2.2"
