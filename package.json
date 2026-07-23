@@ -29,6 +29,7 @@
     "hardhat": "^2.22.0"
   },
   "dependencies": {
+    "@openzeppelin/tron-runtime": "0.1.0-alpha.1",
     "micromatch": "^4.0.8",
     "solc": "^0.8.26",
     "tronweb": "^6.2.2"
@@ -43,7 +44,7 @@
     "prettier": "^3.3.0"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "repository": {
     "type": "git",
