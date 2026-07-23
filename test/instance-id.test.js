@@ -41,9 +41,24 @@ function makeCfg(containerName) {
   };
 }
 
-// A minimal hre-shape carrying just what instance-id / tre-web read.
+// A minimal hre-shape carrying just what tre-web reads.
 const hreShim = {
   network: { name: 'tre', config: { url: URL, accounts: [PRIVATE_KEY] } },
+};
+
+// Bare EIP-1193-style provider for the genesis fallback path — plain JSON-RPC,
+// no key, mirroring what instance-id receives from the network provider.
+const rpcProvider = {
+  async request({ method, params }) {
+    const r = await fetch(URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+    });
+    const j = await r.json();
+    if (j.error) throw new Error(j.error.message);
+    return j.result;
+  },
 };
 
 async function bootCaptureTeardown(containerName) {
@@ -51,7 +66,7 @@ async function bootCaptureTeardown(containerName) {
   const spawned = await lifecycle.ensureUp(cfg, URL, () => {});
   try {
     instanceIds._clearCache();
-    const id = await instanceIds.instanceId(hreShim);
+    const id = await instanceIds.instanceId({ networkName: 'tre', url: URL, provider: rpcProvider });
     const { tronWeb } = treWeb.makeTronWeb(hreShim);
     const genesis = await tronWeb.trx.getBlock(0);
     return { id, spawned: spawned.spawned, genesisId: genesis && genesis.blockID };

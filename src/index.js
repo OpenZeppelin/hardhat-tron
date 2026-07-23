@@ -58,7 +58,12 @@ extendEnvironment((hre) => {
   hre.tre = hre.tre || {};
   Object.assign(hre.tre, {
     makeTronWeb: () => treWeb.makeTronWeb(hre),
-    instanceId: () => instanceIds.instanceId(hre),
+    instanceId: () =>
+      instanceIds.instanceId({
+        networkName: hre.network.name,
+        url: hre.network.config.url,
+        provider: hre.network.provider,
+      }),
     rpcCall: cheatcodes.rpcCall,
     mine: cheatcodes.mine,
     setBlockTime: cheatcodes.setBlockTime,

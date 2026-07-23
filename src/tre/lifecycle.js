@@ -47,6 +47,19 @@ function launchedContainerFor(networkUrl) {
   return _launched.get(networkUrl);
 }
 
+// Whether the url denotes a local TRE — a container this process launched or
+// a loopback address — as opposed to a public TVM network (nile, shasta,
+// mainnet), whose configs also carry `tron: true`.
+function isLocalTre(networkUrl) {
+  if (_launched.has(networkUrl)) return true;
+  try {
+    const host = new URL(networkUrl).hostname;
+    return host === 'localhost' || host === '::1' || host === '[::1]' || host === '0.0.0.0' || /^127\./.test(host);
+  } catch {
+    return false;
+  }
+}
+
 function parsePort(networkUrl) {
   try {
     return new URL(networkUrl).port || '9090';
@@ -212,4 +225,4 @@ function teardown(name, log = () => {}) {
   spawnSync('docker', ['rm', '-f', name], { stdio: 'ignore' });
 }
 
-module.exports = { ensureUp, teardown, isReachable, containerExists, launchedContainerFor };
+module.exports = { ensureUp, teardown, isReachable, containerExists, launchedContainerFor, isLocalTre };

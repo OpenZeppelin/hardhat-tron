@@ -26,7 +26,6 @@
 const { spawnSync } = require('node:child_process');
 const crypto = require('node:crypto');
 
-const treWeb = require('./tre-web');
 const lifecycle = require('../tre/lifecycle');
 
 const _instanceIdCache = new Map();
@@ -44,19 +43,21 @@ function containerInstanceId(containerName) {
   return '0x' + crypto.createHash('sha256').update(raw).digest('hex');
 }
 
-async function genesisInstanceId(hre, url) {
-  const { tronWeb } = treWeb.makeTronWeb(hre);
-  const genesis = await tronWeb.trx.getBlock(0);
-  const blockId = genesis && genesis.blockID;
-  if (!blockId) {
+// Genesis block hash over plain JSON-RPC. java-tron reports the Tron block ID
+// as the block's `hash` (0x-prefixed), so this matches the id TronWeb's
+// `trx.getBlock(0).blockID` would yield — without needing a TronWeb client,
+// whose construction requires a private key the read itself does not.
+async function genesisInstanceId(provider, url) {
+  const genesis = await provider.request({ method: 'eth_getBlockByNumber', params: ['0x0', false] });
+  const hash = genesis && genesis.hash;
+  if (!hash) {
     throw new Error(`Could not read the genesis block hash from ${url} to derive a TRE instance id.`);
   }
-  return `0x${blockId}`;
+  return hash;
 }
 
-async function instanceId(hre) {
-  const url = hre.network.config.url;
-  const cacheKey = `${hre.network.name}:${url}`;
+async function instanceId({ networkName, url, provider }) {
+  const cacheKey = `${networkName}:${url}`;
   const cached = _instanceIdCache.get(cacheKey);
   if (cached) return cached;
 
@@ -69,7 +70,7 @@ async function instanceId(hre) {
     // External TRE (this plugin did not launch the container) or docker
     // identity unavailable: fall back to the genesis hash. See the header note
     // on the limitation this carries for deterministic external restarts.
-    id = await genesisInstanceId(hre, url);
+    id = await genesisInstanceId(provider, url);
   }
 
   _instanceIdCache.set(cacheKey, id);
