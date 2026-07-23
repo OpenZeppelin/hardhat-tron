@@ -51,6 +51,34 @@ describe('end-to-end against a running TRE', function () {
     expect(hre.tre.deployContract).to.be.a('function');
     expect(hre.tre.waitForReceipt).to.be.a('function');
     expect(hre.tre.loadArtifact).to.be.a('function');
+    expect(hre.tre.instanceId).to.be.a('function');
+  });
+
+  it('exposes a stable per-instance id (genesis fallback for this external TRE)', async function () {
+    // This suite runs against a TRE it did not launch (autoStart is off and the
+    // node is merely reachable), so instanceId falls back to the genesis hash.
+    const id = await hre.tre.instanceId();
+    expect(id).to.be.a('string');
+    expect(id.length).to.be.greaterThan(0);
+    // Cached and stable: repeated calls return the same value.
+    expect(await hre.tre.instanceId()).to.equal(id);
+    // The external-TRE fallback derives the id from the genesis block hash.
+    const { tronWeb } = hre.tre.makeTronWeb();
+    const genesis = await tronWeb.trx.getBlock(0);
+    expect(id).to.contain(genesis.blockID);
+  });
+
+  it('answers hardhat_metadata on the network provider with the instance id', async function () {
+    // upgrades tooling probes hardhat_metadata to key its per-instance
+    // manifests. The reported chainId must match eth_chainId and the instanceId
+    // must be the same value hre.tre.instanceId() resolves.
+    const provider = hre.network.provider;
+    const md = await provider.send('hardhat_metadata', []);
+    expect(md).to.be.an('object');
+    expect(md.chainId).to.be.a('number');
+    const chainHex = await provider.send('eth_chainId', []);
+    expect(md.chainId).to.equal(parseInt(chainHex.replace(/^0x/, ''), 16));
+    expect(md.instanceId).to.equal(await hre.tre.instanceId());
   });
 
   it('deploys a contract via hre.ethers.deployContract and reads constructor state', async function () {

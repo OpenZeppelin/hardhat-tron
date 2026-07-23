@@ -35,6 +35,31 @@ function defaultContainerName() {
   return `hardhat-tron-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+// Containers this process launched (docker run or docker start), keyed by the
+// network url they answer on. Populated by ensureUp on the spawn/start path and
+// cleared by teardown. Consumers derive a per-instance identity from the
+// container itself (see runtime/instance-id.js) only for containers we own; a
+// TRE we merely found already reachable (spawned=false) is not recorded, so it
+// falls back to a chain-derived id.
+const _launched = new Map();
+
+function launchedContainerFor(networkUrl) {
+  return _launched.get(networkUrl);
+}
+
+// Whether the url denotes a local TRE — a container this process launched or
+// a loopback address — as opposed to a public TVM network (nile, shasta,
+// mainnet), whose configs also carry `tron: true`.
+function isLocalTre(networkUrl) {
+  if (_launched.has(networkUrl)) return true;
+  try {
+    const host = new URL(networkUrl).hostname;
+    return host === 'localhost' || host === '::1' || host === '[::1]' || host === '0.0.0.0' || /^127\./.test(host);
+  } catch {
+    return false;
+  }
+}
+
 function parsePort(networkUrl) {
   try {
     return new URL(networkUrl).port || '9090';
@@ -187,13 +212,17 @@ async function ensureUp(cfg, networkUrl, log = () => {}) {
     throw e;
   }
 
+  _launched.set(networkUrl, name);
   return { spawned: true, name, url: networkUrl };
 }
 
 function teardown(name, log = () => {}) {
   if (!name) return;
   log(`  tearing down ${name}`);
+  for (const [url, n] of _launched) {
+    if (n === name) _launched.delete(url);
+  }
   spawnSync('docker', ['rm', '-f', name], { stdio: 'ignore' });
 }
 
-module.exports = { ensureUp, teardown, isReachable, containerExists };
+module.exports = { ensureUp, teardown, isReachable, containerExists, launchedContainerFor, isLocalTre };
