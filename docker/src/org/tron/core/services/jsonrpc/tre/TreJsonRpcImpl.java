@@ -189,6 +189,28 @@ public class TreJsonRpcImpl implements TreJsonRpc {
         }
     }
 
+    // DposTask.isManualMining is an AtomicBoolean in tronbox/tre:dev but a
+    // plain boolean in stock java-tron — probe the live value's type so the
+    // patch works against either runtime.
+    private static boolean readManualMining(java.lang.reflect.Field field, Object target)
+            throws IllegalAccessException {
+        Object value = field.get(target);
+        if (value instanceof java.util.concurrent.atomic.AtomicBoolean) {
+            return ((java.util.concurrent.atomic.AtomicBoolean) value).get();
+        }
+        return (Boolean) value;
+    }
+
+    private static void writeManualMining(java.lang.reflect.Field field, Object target, boolean value)
+            throws IllegalAccessException {
+        Object current = field.get(target);
+        if (current instanceof java.util.concurrent.atomic.AtomicBoolean) {
+            ((java.util.concurrent.atomic.AtomicBoolean) current).set(value);
+        } else {
+            field.setBoolean(target, value);
+        }
+    }
+
     // Replicates DposTask.produceBatch's logic but passes MINE_DEADLINE_BUDGET_MS
     // to BlockHandle.produce as the deadline. Uses reflection because DposTask's
     // dposService field is private and the BlockHandle interface lives in a
@@ -200,7 +222,7 @@ public class TreJsonRpcImpl implements TreJsonRpc {
             java.lang.reflect.Field isManualMiningField =
                 this.dposTask.getClass().getDeclaredField("isManualMining");
             isManualMiningField.setAccessible(true);
-            if ((Boolean) isManualMiningField.get(this.dposTask)) {
+            if (readManualMining(isManualMiningField, this.dposTask)) {
                 throw new JsonRpcInternalException("node is already manual mining");
             }
 
@@ -236,7 +258,7 @@ public class TreJsonRpcImpl implements TreJsonRpc {
             java.lang.reflect.Method setBlockWaitLock =
                 blockHandle.getClass().getMethod("setBlockWaitLock", boolean.class);
 
-            isManualMiningField.setBoolean(this.dposTask, true);
+            writeManualMining(isManualMiningField, this.dposTask, true);
             setBlockWaitLock.invoke(blockHandle, true);
             try {
                 for (int i = 0; i < blocksToMine; i++) {
@@ -284,7 +306,7 @@ public class TreJsonRpcImpl implements TreJsonRpc {
                     DposSlot.NEXT_BLOCK_TIMESTAMP_OVERRIDE = 0L;
                 }
             } finally {
-                isManualMiningField.setBoolean(this.dposTask, false);
+                writeManualMining(isManualMiningField, this.dposTask, false);
                 setBlockWaitLock.invoke(blockHandle, false);
             }
             return "0x0";
