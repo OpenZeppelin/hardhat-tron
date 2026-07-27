@@ -1,24 +1,25 @@
 'use strict';
 
-// A stable identifier for a specific TRE node instance.
+// A stable identifier for a specific TRE node instance, resolved in three
+// tiers, each tried only if the one before it does not apply:
 //
-// When this plugin launched the TRE container (via the lifecycle module on
-// `hardhat test` / `node` / `compile`), the id is derived from the container's
-// own identity — its docker container id plus the `StartedAt` timestamp,
-// hashed. Both change on every fresh `docker run` and the timestamp also
-// changes on every `docker start`, so the id distinguishes one boot from the
-// next even when the chain is otherwise byte-for-byte deterministic.
-//
-// This replaces deriving the id from the genesis (block 0) hash: a TRE booted
-// from the same config produces an identical genesis block on every restart, so
-// the genesis hash cannot tell two deterministic restarts apart. It is kept
-// only as a fallback for an externally-provided TRE — one this plugin did not
-// launch (already reachable when a task started, a manual `docker-compose up`,
-// or a parallel-test runner pointing at its own `TRE_URL`). In that case the
-// container identity is unknown, so the genesis hash is used and two restarts
-// of an external TRE with identical config will share an id. Consumers that
-// need a guaranteed-fresh id per restart of an external TRE should let this
-// plugin manage the container lifecycle.
+//   1. Owned: this plugin launched the container (lifecycle.launchedContainerFor).
+//      Its identity is read via `docker inspect` and MUST succeed — a failure
+//      here throws rather than falling through to a weaker tier, since we know
+//      a container exists and silently substituting a different id would be
+//      wrong, not merely imprecise.
+//   2. Discovered: some other local process launched the container, but it is
+//      still identifiable by the docker daemon from the url's host port
+//      (lifecycle.containerServing). Same hash formula as tier 1
+//      (hashContainerIdentity), so an owned and a foreign observer of the same
+//      container agree on its id.
+//   3. Genesis fallback: no docker container could be attributed to the url
+//      (remote daemon, non-loopback host, or docker unavailable). The genesis
+//      (block 0) hash is a constant shared by every TRE booted from the same
+//      image and startup env, so it cannot distinguish two such TREs, or two
+//      deterministic restarts of the same one. Consumers that need a
+//      guaranteed-fresh id per restart should let this plugin manage the
+//      container lifecycle (tier 1) or run it where tier 2 can see it.
 //
 // The id is immutable for the life of a node, so it is resolved once and cached
 // per url. `networkName` is accepted for the caller's convenience but does not
@@ -32,9 +33,14 @@ const lifecycle = require('../tre/lifecycle');
 
 const _instanceIdCache = new Map();
 
+// Shared hashing site for both container-derived tiers (owned and discovered),
+// so they cannot drift and produce different ids for the same container.
+function hashContainerIdentity(id, startedAt) {
+  return '0x' + crypto.createHash('sha256').update(`${id}|${startedAt}`).digest('hex');
+}
+
 // docker container id + StartedAt, hashed. Returns undefined if docker is
-// unavailable, the container is unknown, or the fields could not be read — the
-// caller then falls back to the genesis-derived id.
+// unavailable, the container is unknown, or the fields could not be read.
 function containerInstanceId(containerName) {
   const r = spawnSync('docker', ['inspect', '--format', '{{.Id}}|{{.State.StartedAt}}', containerName], {
     encoding: 'utf8',
@@ -42,7 +48,8 @@ function containerInstanceId(containerName) {
   if (r.status !== 0) return undefined;
   const raw = (r.stdout || '').trim();
   if (!raw || raw.includes('<no value>') || raw.startsWith('|') || raw.endsWith('|')) return undefined;
-  return '0x' + crypto.createHash('sha256').update(raw).digest('hex');
+  const [id, startedAt] = raw.split('|');
+  return hashContainerIdentity(id, startedAt);
 }
 
 // Genesis block hash over plain JSON-RPC. java-tron reports the Tron block ID
@@ -63,14 +70,25 @@ async function instanceId({ networkName, url, provider }) {
   if (cached) return cached;
 
   let id;
-  const containerName = lifecycle.launchedContainerFor(url);
-  if (containerName) {
-    id = containerInstanceId(containerName);
+  const ownedName = lifecycle.launchedContainerFor(url);
+  if (ownedName) {
+    // We launched this container, so its identity is readable by contract;
+    // falling back would substitute an id that repeats across restarts.
+    id = containerInstanceId(ownedName);
+    if (!id) {
+      throw new Error(
+        `hardhat-tron launched the TRE container "${ownedName}" for ${url} ` +
+          `but could not read its docker identity (docker inspect failed). ` +
+          `Check that docker is still reachable, or remove the container and rerun.`,
+      );
+    }
+  } else {
+    const found = lifecycle.containerServing(url);
+    if (found) id = hashContainerIdentity(found.id, found.startedAt);
   }
   if (!id) {
-    // External TRE (this plugin did not launch the container) or docker
-    // identity unavailable: fall back to the genesis hash. See the header note
-    // on the limitation this carries for deterministic external restarts.
+    // Last resort: the genesis hash is constant across deterministic boots
+    // of the same image + env, so it cannot distinguish restarts.
     id = await genesisInstanceId(provider, url);
   }
 

@@ -47,6 +47,14 @@ function launchedContainerFor(networkUrl) {
   return _launched.get(networkUrl);
 }
 
+// Test-only: manipulate launched-container ownership without booting docker.
+function _setLaunchedForTests(url, name) {
+  _launched.set(url, name);
+}
+function _forgetLaunchedForTests(url) {
+  _launched.delete(url);
+}
+
 // True when the host denotes this machine's loopback interface. A url that
 // resolves elsewhere cannot be identified through the local docker daemon.
 function isLoopbackHost(host) {
@@ -305,4 +313,6 @@ module.exports = {
   isLocalTre,
   isLoopbackHost,
   containerServing,
+  _setLaunchedForTests,
+  _forgetLaunchedForTests,
 };

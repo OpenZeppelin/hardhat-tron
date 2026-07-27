@@ -48,18 +48,21 @@ const hreShim = {
 
 // Bare EIP-1193-style provider for the genesis fallback path — plain JSON-RPC,
 // no key, mirroring what instance-id receives from the network provider.
-const rpcProvider = {
-  async request({ method, params }) {
-    const r = await fetch(URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
-    });
-    const j = await r.json();
-    if (j.error) throw new Error(j.error.message);
-    return j.result;
-  },
-};
+function makeRpcProvider(url) {
+  return {
+    async request({ method, params }) {
+      const r = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+      });
+      const j = await r.json();
+      if (j.error) throw new Error(j.error.message);
+      return j.result;
+    },
+  };
+}
+const rpcProvider = makeRpcProvider(URL);
 
 async function bootCaptureTeardown(containerName) {
   const cfg = makeCfg(containerName);
@@ -128,6 +131,64 @@ describe('TRE instance id across sequential boots', function () {
       expect(idB).to.not.equal(idA);
     } finally {
       lifecycle.teardown(b.name);
+    }
+  });
+
+  it('resolves the same id for a process that did not launch the container (docker)', async function () {
+    if (!dockerAvailable()) this.skip();
+    this.timeout(120000);
+    const cfg = makeCfg('hardhat-tron-foreign');
+    const up = await lifecycle.ensureUp(cfg, URL, () => {});
+    try {
+      const ownedId = await instanceIds.instanceId({ networkName: 'tre', url: URL, provider: rpcProvider });
+      // Simulate a foreign process: no ownership record, no memoized id.
+      lifecycle._forgetLaunchedForTests(URL);
+      instanceIds.evictInstanceId(URL);
+      const foreignId = await instanceIds.instanceId({ networkName: 'tre', url: URL, provider: rpcProvider });
+      expect(foreignId).to.equal(ownedId);
+      const genesis = await rpcProvider.request({ method: 'eth_getBlockByNumber', params: ['0x0', false] });
+      expect(foreignId).to.not.equal(genesis.hash);
+    } finally {
+      lifecycle.teardown(up.name);
+    }
+  });
+
+  it('gives two foreign-observed instances different ids (docker)', async function () {
+    if (!dockerAvailable()) this.skip();
+    this.timeout(240000);
+    const URL_B = `http://127.0.0.1:${PORT + 1}/jsonrpc`;
+    const cfgA = makeCfg('hardhat-tron-par-a');
+    const cfgB = { ...makeCfg('hardhat-tron-par-b'), port: PORT + 1 };
+    const a = await lifecycle.ensureUp(cfgA, URL, () => {});
+    const b = await lifecycle.ensureUp(cfgB, URL_B, () => {});
+    try {
+      lifecycle._forgetLaunchedForTests(URL);
+      lifecycle._forgetLaunchedForTests(URL_B);
+      instanceIds.evictInstanceId(URL);
+      instanceIds.evictInstanceId(URL_B);
+      const idA = await instanceIds.instanceId({ networkName: 'tre', url: URL, provider: rpcProvider });
+      const idB = await instanceIds.instanceId({ networkName: 'tre', url: URL_B, provider: makeRpcProvider(URL_B) });
+      expect(idA).to.not.equal(idB);
+    } finally {
+      lifecycle.teardown(a.name);
+      lifecycle.teardown(b.name);
+    }
+  });
+});
+
+describe('owned-container identity failures', function () {
+  const OWNED_URL = 'http://127.0.0.1:19553/jsonrpc';
+  afterEach(function () {
+    lifecycle._forgetLaunchedForTests(OWNED_URL);
+    instanceIds.evictInstanceId(OWNED_URL);
+  });
+  it('throws instead of falling back when the launched container cannot be inspected', async function () {
+    lifecycle._setLaunchedForTests(OWNED_URL, 'hardhat-tron-no-such-container');
+    try {
+      await instanceIds.instanceId({ networkName: 'tre', url: OWNED_URL, provider: rpcProvider });
+      throw new Error('expected instanceId to throw');
+    } catch (e) {
+      expect(e.message).to.contain('hardhat-tron-no-such-container');
     }
   });
 });
