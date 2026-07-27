@@ -1,6 +1,5 @@
 'use strict';
 
-//
 // 1. `hardhat_metadata` must work on a keyless network. The genesis-derived
 //    instance id is read over plain JSON-RPC (`eth_getBlockByNumber`), which
 //    needs no private key — it must not route through a TronWeb client, whose

@@ -98,7 +98,9 @@ export interface TreRuntime {
    * and startup env: restarts and unrelated instances then share an id. Run
    * the patched jar or locally visible docker if you need per-boot uniqueness.
    * On non-local networks the probe for (1) adds at most ~2s to the first
-   * call; `hardhat_metadata` remains answered only for local TREs.
+   * call; `hardhat_metadata` remains answered only for local TREs. When this
+   * plugin launched the TRE container itself but its docker identity cannot
+   * be read, the promise rejects rather than silently degrading to (3).
    */
   instanceId(): Promise<string>;
   rpcCall(tronWeb: TronWeb, method: string, params?: unknown[]): Promise<unknown>;
