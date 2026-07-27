@@ -45,7 +45,9 @@ const instanceIds = require('../src/runtime/instance-id');
 const lifecycle = require('../src/tre/lifecycle');
 
 const GENESIS_HASH = '0x0000000000000000c93baa76a4a508f798a96f59156d9eb17ecede8ec845df2f';
-const LOOPBACK_URL = 'http://127.0.0.1:9090/jsonrpc';
+// An unbound loopback port, not the default TRE port: discovery must find
+// nothing here so the genesis stub answer stays deterministic.
+const LOOPBACK_URL = 'http://127.0.0.1:45999/jsonrpc';
 
 // A wrapped provider stub that answers only the two key-free RPC methods the
 // metadata path is allowed to use. Anything else — hardhat_metadata included —
@@ -66,7 +68,16 @@ function stubProvider(calls) {
 }
 
 describe('TronMetadataProvider', function () {
+  // Also kill tier-2 discovery so the stubbed provider's genesis answer is
+  // deterministic even if something happens to be bound on the loopback port.
+  let prevDockerHost;
+  beforeEach(function () {
+    prevDockerHost = process.env.DOCKER_HOST;
+    process.env.DOCKER_HOST = 'tcp://stub:2376';
+  });
   afterEach(function () {
+    if (prevDockerHost === undefined) delete process.env.DOCKER_HOST;
+    else process.env.DOCKER_HOST = prevDockerHost;
     instanceIds.evictInstanceId(LOOPBACK_URL);
   });
 

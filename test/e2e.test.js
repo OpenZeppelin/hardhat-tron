@@ -13,9 +13,15 @@
 // configured port.
 
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 const { expect } = require('chai');
 
 const { isReachable } = require('../src/tre/lifecycle');
+
+function dockerAvailable() {
+  const r = spawnSync('docker', ['version'], { encoding: 'utf8' });
+  return r.status === 0;
+}
 
 const FIXTURE_DIR = path.join(__dirname, 'fixtures', 'minimal');
 const TRE_URL = process.env.TRE_URL || 'http://127.0.0.1:9090/jsonrpc';
@@ -54,18 +60,25 @@ describe('end-to-end against a running TRE', function () {
     expect(hre.tre.instanceId).to.be.a('function');
   });
 
-  it('exposes a stable per-instance id (genesis fallback for this external TRE)', async function () {
+  it('exposes a stable per-instance id for this external TRE', async function () {
     // This suite runs against a TRE it did not launch (autoStart is off and the
-    // node is merely reachable), so instanceId falls back to the genesis hash.
+    // node is merely reachable). Resolution still goes through the full tier
+    // chain: a patched node answers tier 0 directly; otherwise, if docker can
+    // see a container publishing this port, tier 2 discovers it; only with
+    // neither does this fall back to the genesis hash (tier 3).
     const id = await hre.tre.instanceId();
-    expect(id).to.be.a('string');
-    expect(id.length).to.be.greaterThan(0);
+    expect(id).to.match(/^0x[0-9a-f]{64}$/);
     // Cached and stable: repeated calls return the same value.
     expect(await hre.tre.instanceId()).to.equal(id);
-    // The external-TRE fallback derives the id from the genesis block hash.
     const { tronWeb } = hre.tre.makeTronWeb();
     const genesis = await tronWeb.trx.getBlock(0);
-    expect(id).to.contain(genesis.blockID);
+    // A container-derived id (tiers 0/2) never coincides with the genesis
+    // hash. Only assert the inequality when docker is available to discover
+    // it — a non-docker external TRE (plain jar) legitimately still falls
+    // back to the genesis hash.
+    if (dockerAvailable()) {
+      expect(id).to.not.contain(genesis.blockID);
+    }
   });
 
   it('answers hardhat_metadata on the network provider with the instance id', async function () {

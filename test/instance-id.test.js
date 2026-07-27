@@ -205,6 +205,7 @@ describe('TRE instance id across sequential boots', function () {
       expect(ownedId).to.not.equal(genesis.hash);
     } finally {
       lifecycle.teardown(up.name);
+      instanceIds.evictInstanceId(URL);
     }
   });
 });
