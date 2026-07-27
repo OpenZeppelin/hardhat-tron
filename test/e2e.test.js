@@ -13,14 +13,24 @@
 // configured port.
 
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
 const { expect } = require('chai');
 
-const { isReachable } = require('../src/tre/lifecycle');
+const lifecycle = require('../src/tre/lifecycle');
+const { isReachable } = lifecycle;
 
-function dockerAvailable() {
-  const r = spawnSync('docker', ['version'], { encoding: 'utf8' });
-  return r.status === 0;
+// True only if tier 0 (node-served) would actually answer for this url —
+// independent of whether *some* docker daemon happens to be reachable.
+async function tier0Answers(url) {
+  try {
+    const res = await fetch(url.replace(/\/jsonrpc$/, '/tre'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tre_instanceId', params: [] }),
+    }).then((r) => r.json());
+    return typeof res.result === 'string' && /^0x[0-9a-f]{64}$/.test(res.result);
+  } catch {
+    return false;
+  }
 }
 
 const FIXTURE_DIR = path.join(__dirname, 'fixtures', 'minimal');
@@ -72,11 +82,10 @@ describe('end-to-end against a running TRE', function () {
     expect(await hre.tre.instanceId()).to.equal(id);
     const { tronWeb } = hre.tre.makeTronWeb();
     const genesis = await tronWeb.trx.getBlock(0);
-    // A container-derived id (tiers 0/2) never coincides with the genesis
-    // hash. Only assert the inequality when docker is available to discover
-    // it — a non-docker external TRE (plain jar) legitimately still falls
-    // back to the genesis hash.
-    if (dockerAvailable()) {
+    // Only assert the inequality when a stronger-than-genesis source is
+    // confirmed for THIS url (tier 0 answers, or docker discovers it) —
+    // an unrelated local docker daemon proves nothing about this TRE.
+    if ((await tier0Answers(TRE_URL)) || lifecycle.containerServing(TRE_URL)) {
       expect(id).to.not.contain(genesis.blockID);
     }
   });
