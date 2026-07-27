@@ -6,7 +6,11 @@
 //   0. Node-served: a patched TRE answers `tre_instanceId` directly over RPC
 //      (nodeServedInstanceId) — a random id generated once per node process.
 //      Any observer, including one docker-blind to the container, resolves
-//      the same value, so this short-circuits tiers 1-2 entirely.
+//      the same value, so this short-circuits tiers 1-2 entirely. Deliberately
+//      probed for ANY url, not just local ones, so a remote self-hosted
+//      patched TRE still answers; a network that does not answer this costs
+//      at most the 2s timeout, and only once per process since the result is
+//      cached thereafter.
 //   1. Owned: this plugin launched the container (lifecycle.launchedContainerFor).
 //      Its identity is read via `docker inspect` and MUST succeed — a failure
 //      here throws rather than falling through to a weaker tier, since we know

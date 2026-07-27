@@ -89,15 +89,16 @@ export interface TreRuntime {
   makeTronWeb(): { tronWeb: TronWeb; address: string };
   /**
    * A stable identifier for the specific TRE node instance the active network
-   * points at. When this plugin launched the TRE container, the id is derived
-   * from the container's own identity (docker container id + `StartedAt`),
-   * so every fresh boot — and every restart — yields a distinct value even
-   * when the chain is otherwise deterministic. For an externally-provided TRE
-   * (one this plugin did not launch), the id falls back to the genesis block
-   * hash; because a TRE booted from identical config produces an identical
-   * genesis block, two deterministic restarts of an external TRE will share an
-   * id. Let this plugin manage the container lifecycle if you need a
-   * guaranteed-fresh id per restart.
+   * points at. Resolved in order: (1) the node itself, when it runs the patched
+   * jar answering `tre_instanceId` — a random per-boot value any observer can
+   * read, with or without docker access; (2) the docker container's identity
+   * (container id + `StartedAt`) when the container is visible to the local
+   * docker daemon, whether or not this plugin launched it; (3) the genesis
+   * block hash, which is identical for every TRE booted from the same image
+   * and startup env: restarts and unrelated instances then share an id. Run
+   * the patched jar or locally visible docker if you need per-boot uniqueness.
+   * On non-local networks the probe for (1) adds at most ~2s to the first
+   * call; `hardhat_metadata` remains answered only for local TREs.
    */
   instanceId(): Promise<string>;
   rpcCall(tronWeb: TronWeb, method: string, params?: unknown[]): Promise<unknown>;

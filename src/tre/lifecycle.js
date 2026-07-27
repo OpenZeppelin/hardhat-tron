@@ -107,7 +107,11 @@ function containerServing(networkUrl) {
   for (const line of (ins.stdout || '').trim().split('\n')) {
     const sep2 = line.indexOf('|', line.indexOf('|') + 1);
     if (sep2 === -1) continue;
-    const [id, startedAt] = line.slice(0, sep2).split('|');
+    const idStarted = line.slice(0, sep2);
+    const sep1 = idStarted.indexOf('|');
+    if (sep1 === -1) continue;
+    const id = idStarted.slice(0, sep1);
+    const startedAt = idStarted.slice(sep1 + 1);
     let ports;
     try {
       ports = JSON.parse(line.slice(sep2 + 1));
@@ -288,7 +292,9 @@ async function ensureUp(cfg, networkUrl, log = () => {}) {
 
   _launched.set(networkUrl, name);
   // A prior container on this url may have been removed outside teardown
-  // (e.g. `docker rm` from another shell), leaving a stale cached id behind.
+  // (e.g. `docker rm` from another shell), leaving a stale cached id behind —
+  // or, more fundamentally, the `docker start` reuse path above changes
+  // StartedAt, so any cached id for this url is stale by construction.
   // Evict so this fresh boot re-resolves.
   // Lazy require: a top-level one would cycle (instance-id requires this module).
   const { evictInstanceId } = require('../runtime/instance-id');

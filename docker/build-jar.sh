@@ -8,10 +8,12 @@
 # Run this once after each change to docker/src/**/*.java. The
 # output jar is gitignored.
 #
-# Strategy: spin up a TEMP `tronbox/tre:dev` container, use ITS
-# Java toolchain (OpenJDK 8 + the unpatched FullNode.jar as
-# classpath) to compile the patch, pull the resulting jar back to
-# the host, tear the temp container down.
+# Strategy: spin up a TEMP `tronbox/tre:dev` container, apt-install a
+# JDK matching its bundled JRE (Temurin 17, JRE-only) on demand, use
+# the unpatched FullNode.jar as classpath to compile the patch, pull
+# the resulting jar back to the host, tear the temp container down.
+# The JDK bootstrap needs network access on first run of each build
+# container.
 #
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -32,8 +34,9 @@ echo "→ Ensuring the container has a JDK (image ships a JRE only)..."
 docker exec "$TEMP" sh -c '
   command -v javac >/dev/null 2>&1 && exit 0
   major=$(java -version 2>&1 | sed -n "s/.* version \"\([0-9]*\).*/\1/p")
+  [ -n "$major" ] || { echo "could not determine the container Java major version" >&2; exit 1; }
   apt-get update -qq
-  apt-get install -y -qq "openjdk-${major}-jdk-headless"
+  apt-get install -y -qq --no-install-recommends "openjdk-${major}-jdk-headless"
 '
 
 echo "→ Compiling patch sources..."

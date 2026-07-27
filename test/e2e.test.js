@@ -6,7 +6,7 @@
 // and local development without a container up also runs clean. To
 // exercise the full path locally:
 //
-//   docker-compose -f docker-compose.tre.yml up -d
+//   docker run -d -p 9090:9090 tronbox/tre:dev
 //   npm test
 //
 // or any equivalent that brings a TRE container up on the
@@ -26,6 +26,7 @@ async function tier0Answers(url) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tre_instanceId', params: [] }),
+      signal: AbortSignal.timeout(2000),
     }).then((r) => r.json());
     return typeof res.result === 'string' && /^0x[0-9a-f]{64}$/.test(res.result);
   } catch {

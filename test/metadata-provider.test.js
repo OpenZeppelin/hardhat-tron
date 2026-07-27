@@ -1,7 +1,5 @@
 'use strict';
 
-// Regression coverage for two review findings on the hardhat_metadata hook
-// (PR #33):
 //
 // 1. `hardhat_metadata` must work on a keyless network. The genesis-derived
 //    instance id is read over plain JSON-RPC (`eth_getBlockByNumber`), which
