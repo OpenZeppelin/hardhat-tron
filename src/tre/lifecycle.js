@@ -47,14 +47,77 @@ function launchedContainerFor(networkUrl) {
   return _launched.get(networkUrl);
 }
 
+// True when the host denotes this machine's loopback interface. A url that
+// resolves elsewhere cannot be identified through the local docker daemon.
+function isLoopbackHost(host) {
+  return host === 'localhost' || host === '::1' || host === '[::1]' || host === '0.0.0.0' || /^127\./.test(host);
+}
+
+// True when a docker inspect Ports map binds the given host port on a
+// loopback-reachable interface.
+function bindsHostPort(portsJson, hostPort) {
+  for (const bindings of Object.values(portsJson || {})) {
+    for (const b of bindings || []) {
+      if (!b || b.HostPort !== String(hostPort)) continue;
+      const ip = b.HostIp || '';
+      if (ip === '' || ip === '0.0.0.0' || ip === '::' || ip === '::1' || /^127\./.test(ip)) return true;
+    }
+  }
+  return false;
+}
+
+// Identify the running container serving a loopback url: a host port is
+// exclusive per docker daemon, so the url's port keys `docker ps` for any
+// observer. Returns { id, startedAt } or undefined (no docker, non-loopback,
+// remote DOCKER_HOST, no match, or ambiguous — fail closed).
+function containerServing(networkUrl) {
+  let host, port;
+  try {
+    const u = new URL(networkUrl);
+    host = u.hostname;
+    port = u.port || '9090';
+  } catch {
+    return undefined;
+  }
+  if (!isLoopbackHost(host)) return undefined;
+  const dockerHost = process.env.DOCKER_HOST || '';
+  if (dockerHost && !/^(unix:|npipe:)/.test(dockerHost)) return undefined;
+
+  const ps = spawnSync('docker', ['ps', '--filter', `publish=${port}`, '--format', '{{.ID}}'], { encoding: 'utf8' });
+  if (ps.status !== 0) return undefined;
+  const ids = (ps.stdout || '').trim().split('\n').filter(Boolean);
+  if (ids.length === 0) return undefined;
+
+  const ins = spawnSync(
+    'docker',
+    ['inspect', '--format', '{{.Id}}|{{.State.StartedAt}}|{{json .NetworkSettings.Ports}}', ...ids],
+    { encoding: 'utf8' },
+  );
+  if (ins.status !== 0) return undefined;
+
+  const matches = [];
+  for (const line of (ins.stdout || '').trim().split('\n')) {
+    const sep2 = line.indexOf('|', line.indexOf('|') + 1);
+    if (sep2 === -1) continue;
+    const [id, startedAt] = line.slice(0, sep2).split('|');
+    let ports;
+    try {
+      ports = JSON.parse(line.slice(sep2 + 1));
+    } catch {
+      continue;
+    }
+    if (id && startedAt && bindsHostPort(ports, port)) matches.push({ id, startedAt });
+  }
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
 // Whether the url denotes a local TRE — a container this process launched or
 // a loopback address — as opposed to a public TVM network (nile, shasta,
 // mainnet), whose configs also carry `tron: true`.
 function isLocalTre(networkUrl) {
   if (_launched.has(networkUrl)) return true;
   try {
-    const host = new URL(networkUrl).hostname;
-    return host === 'localhost' || host === '::1' || host === '[::1]' || host === '0.0.0.0' || /^127\./.test(host);
+    return isLoopbackHost(new URL(networkUrl).hostname);
   } catch {
     return false;
   }
@@ -233,4 +296,13 @@ function teardown(name, log = () => {}) {
   spawnSync('docker', ['rm', '-f', name], { stdio: 'ignore' });
 }
 
-module.exports = { ensureUp, teardown, isReachable, containerExists, launchedContainerFor, isLocalTre };
+module.exports = {
+  ensureUp,
+  teardown,
+  isReachable,
+  containerExists,
+  launchedContainerFor,
+  isLocalTre,
+  isLoopbackHost,
+  containerServing,
+};
