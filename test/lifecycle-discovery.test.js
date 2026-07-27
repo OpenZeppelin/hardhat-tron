@@ -48,6 +48,60 @@ const rpcProvider = {
   },
 };
 
+// Pure host/port matching rules — no docker involved. Mirrors what docker
+// inspect reports: Ports keyed by container-side port, bindings carrying the
+// HostIp exactly as bound (no brackets on IPv6), url hosts as URL.hostname
+// yields them (brackets kept on IPv6).
+describe('binding host matching (pure)', function () {
+  const ports = (ip, containerPort = '9090/tcp', hostPort = '9494') => ({
+    [containerPort]: [{ HostIp: ip, HostPort: hostPort }],
+  });
+
+  it('matches a literal IPv4 url host against the same HostIp', function () {
+    expect(lifecycle.bindsHostPort(ports('127.0.0.1'), '9494', '127.0.0.1')).to.equal(true);
+  });
+
+  it('does not match a different loopback address', function () {
+    expect(lifecycle.bindsHostPort(ports('127.0.0.1'), '9494', '127.0.0.2')).to.equal(false);
+    expect(lifecycle.hostMatchesBinding('127.0.0.2', '127.0.0.1')).to.equal(false);
+  });
+
+  it('matches a bracketed IPv6 url host against the unbracketed HostIp', function () {
+    expect(lifecycle.bindsHostPort(ports('::1'), '9494', '[::1]')).to.equal(true);
+    expect(lifecycle.hostMatchesBinding('[::1]', '::1')).to.equal(true);
+  });
+
+  it('does not match across address families for literal hosts', function () {
+    expect(lifecycle.hostMatchesBinding('[::1]', '127.0.0.1')).to.equal(false);
+    expect(lifecycle.hostMatchesBinding('127.0.0.1', '::1')).to.equal(false);
+  });
+
+  it('wildcard bindings match any url host', function () {
+    for (const wildcard of ['', '0.0.0.0', '::']) {
+      expect(lifecycle.hostMatchesBinding('127.0.0.1', wildcard)).to.equal(true);
+      expect(lifecycle.hostMatchesBinding('127.0.0.2', wildcard)).to.equal(true);
+      expect(lifecycle.hostMatchesBinding('[::1]', wildcard)).to.equal(true);
+      expect(lifecycle.hostMatchesBinding('localhost', wildcard)).to.equal(true);
+    }
+  });
+
+  it('an unspecified url host (localhost) matches any loopback binding', function () {
+    expect(lifecycle.hostMatchesBinding('localhost', '127.0.0.1')).to.equal(true);
+    expect(lifecycle.hostMatchesBinding('localhost', '127.0.0.3')).to.equal(true);
+    expect(lifecycle.hostMatchesBinding('localhost', '::1')).to.equal(true);
+  });
+
+  it('excludes bindings whose container-side port is not the TRE 9090/tcp', function () {
+    // A forwarder publishing the right host port from the wrong internal port.
+    expect(lifecycle.bindsHostPort(ports('127.0.0.1', '80/tcp'), '9494', '127.0.0.1')).to.equal(false);
+    expect(lifecycle.bindsHostPort(ports('127.0.0.1', '9494/tcp'), '9494', '127.0.0.1')).to.equal(false);
+  });
+
+  it('requires the host port to match on the 9090/tcp binding', function () {
+    expect(lifecycle.bindsHostPort(ports('127.0.0.1', '9090/tcp', '9595'), '9494', '127.0.0.1')).to.equal(false);
+  });
+});
+
 describe('containerServing url guards', function () {
   it('returns undefined for a non-loopback url', function () {
     expect(lifecycle.containerServing('http://10.0.0.5:9090/jsonrpc')).to.equal(undefined);
@@ -88,5 +142,24 @@ describe('containerServing docker integration', function () {
   it('returns undefined for an unbound loopback port (docker)', function () {
     if (!dockerAvailable()) this.skip();
     expect(lifecycle.containerServing('http://127.0.0.1:1/jsonrpc')).to.equal(undefined);
+  });
+
+  it('does not discover a forwarder-style container publishing the port from a non-TRE internal port (docker)', function () {
+    if (!dockerAvailable()) this.skip();
+    this.timeout(60000);
+    const name = 'hardhat-tron-fwd-fingerprint';
+    spawnSync('docker', ['rm', '-f', name], { stdio: 'ignore' });
+    // nginx listens on 80 inside; publishing 127.0.0.1:PORT:80 is the shape of
+    // a port-forwarder/proxy in front of the url — same host port, wrong
+    // container port. The fingerprint must reject it.
+    const run = spawnSync('docker', ['run', '-d', '--name', name, '-p', `127.0.0.1:${PORT}:80`, 'nginx:alpine'], {
+      encoding: 'utf8',
+    });
+    if (run.status !== 0) this.skip(); // image not available locally and not pullable
+    try {
+      expect(lifecycle.containerServing(URL)).to.equal(undefined);
+    } finally {
+      spawnSync('docker', ['rm', '-f', name], { stdio: 'ignore' });
+    }
   });
 });

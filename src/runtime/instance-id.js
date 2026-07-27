@@ -17,10 +17,16 @@
 //      a container exists and silently substituting a different id would be
 //      wrong, not merely imprecise.
 //   2. Discovered: some other local process launched the container, but it is
-//      still identifiable by the docker daemon from the url's host port
-//      (lifecycle.containerServing). Same hash formula as tier 1
-//      (hashContainerIdentity), so an owned and a foreign observer of the same
-//      container agree on its id.
+//      still identifiable by the docker daemon from the url's host and port
+//      (lifecycle.containerServing). Host ports are only exclusive within IPv4
+//      on a single interface (127.0.0.1/.2 and [::1] can each carry a
+//      different container on one port, and `docker ps --filter publish` is
+//      blind to IPv6-only bindings on Docker Desktop), so the lookup matches
+//      the url's exact host and requires the TRE's fixed 9090/tcp container
+//      port. Not forwarder-proof: a proxy that itself uses 9090 internally
+//      would still be misattributed — only tier 0 is forwarder-proof. Same
+//      hash formula as tier 1 (hashContainerIdentity), so an owned and a
+//      foreign observer of the same container agree on its id.
 //   3. Genesis fallback: no docker container could be attributed to the url
 //      (remote daemon, non-loopback host, or docker unavailable). The genesis
 //      (block 0) hash is a constant shared by every TRE booted from the same
@@ -29,10 +35,12 @@
 //      guaranteed-fresh id per restart should let this plugin manage the
 //      container lifecycle (tier 1) or run it where tier 2 can see it.
 //
-// Container identity (tiers 1-2) is per-boot fresh because docker assigns a
-// new container id on every fresh `docker run`, and `StartedAt` also changes
-// on every `docker start` — so together they distinguish restarts even of a
-// reused container.
+// Container identity (tiers 1-2) is per-boot fresh because every boot is a
+// fresh `docker run` with a new container id: TRE containers are single-boot
+// by construction (the image corrupts its own fullnode.conf on restart), so
+// the lifecycle never reuses a container — which is exactly why a per-boot id
+// is correct. `StartedAt` participates in the hash as a belt-and-braces guard
+// against an out-of-band `docker start` of a foreign container.
 //
 // The id is immutable for the life of a node, so it is resolved once and cached
 // per url. `networkName` is accepted for the caller's convenience but does not

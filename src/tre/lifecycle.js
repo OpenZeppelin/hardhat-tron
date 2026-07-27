@@ -10,7 +10,7 @@
 //   * isReachable(url)        -- JSON-RPC tre_version probe, 2s timeout
 //   * ensureUp(cfg, log)      -- docker run + wait-for-ready
 //   * teardown(name)          -- docker rm -f
-//   * containerExists(name)   -- short-circuit on `keepRunning` reuse
+//   * containerExists(name)   -- leftover-container detection in ensureUp
 //
 // Container layout mirrors `docker run -d -p 9090:9090 tronbox/tre:dev`:
 //   image:     tronbox/tre:dev (or whatever cfg.image is)
@@ -35,8 +35,8 @@ function defaultContainerName() {
   return `hardhat-tron-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-// Containers this process launched (docker run or docker start), keyed by the
-// network url they answer on. Populated by ensureUp on the spawn/start path and
+// Containers this process launched (docker run), keyed by the network url
+// they answer on. Populated by ensureUp on the spawn path and
 // cleared by teardown. Consumers derive a per-instance identity from the
 // container itself (see runtime/instance-id.js) directly for containers we
 // own; a TRE we merely found already reachable (spawned=false) is not
@@ -60,27 +60,68 @@ function _forgetLaunchedForTests(url) {
 // True when the host denotes this machine's loopback interface. A url that
 // resolves elsewhere cannot be identified through the local docker daemon.
 function isLoopbackHost(host) {
-  return host === 'localhost' || host === '::1' || host === '[::1]' || host === '0.0.0.0' || /^127\./.test(host);
+  return (
+    host === 'localhost' ||
+    host === '::1' ||
+    host === '[::1]' ||
+    host === '0.0.0.0' ||
+    host === '::' ||
+    host === '[::]' ||
+    /^127\./.test(host)
+  );
 }
 
-// True when a docker inspect Ports map binds the given host port on a
-// loopback-reachable interface.
-function bindsHostPort(portsJson, hostPort) {
-  for (const [key, bindings] of Object.entries(portsJson || {})) {
-    if (!key.endsWith('/tcp')) continue;
-    for (const b of bindings || []) {
-      if (!b || b.HostPort !== String(hostPort)) continue;
-      const ip = b.HostIp || '';
-      if (ip === '' || ip === '0.0.0.0' || ip === '::' || ip === '::1' || /^127\./.test(ip)) return true;
-    }
+// The TRE's fixed container-side port; the plugin always publishes
+// `127.0.0.1:<hostPort>:9090`. Requiring the matched binding to sit on this
+// exact container port fingerprints the node and excludes port-forwarder
+// containers (a socat republishing 9614->9614 in front of a TRE was otherwise
+// discovered instead of the node, and its id survived a node swap). Residual:
+// a crafted forwarder that itself uses 9090 internally still matches — only
+// tier 0 (the node-served tre_instanceId) is forwarder-proof.
+const TRE_CONTAINER_PORT = '9090/tcp';
+
+// Node's URL.hostname keeps IPv6 hosts bracketed ('[::1]') while docker's
+// HostIp carries none ('::1') — strip before comparing.
+function stripBrackets(host) {
+  return host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
+}
+
+// Pure host-matching rule for one docker port binding. A binding matches when
+// its HostIp is a wildcard ('', '0.0.0.0', '::' — bound on every interface),
+// or, for the "unspecified" url hosts (localhost / 0.0.0.0 / ::) that name no
+// concrete interface, when it sits on any loopback address. A literal url
+// host (127.x.x.x, ::1) must equal the HostIp exactly: host ports are only
+// exclusive within IPv4 on a single interface — 127.0.0.1/.2/.3 and [::1] can
+// each carry a different container on the same port — so anything looser
+// collapses distinct instances or misattributes across address families.
+function hostMatchesBinding(urlHost, hostIp) {
+  const host = stripBrackets(urlHost);
+  const ip = stripBrackets(hostIp || '');
+  if (ip === '' || ip === '0.0.0.0' || ip === '::') return true;
+  if (host === 'localhost' || host === '0.0.0.0' || host === '::') {
+    return ip === '::1' || /^127\./.test(ip);
+  }
+  return ip === host;
+}
+
+// True when a docker inspect Ports map binds the given host port for the
+// given url host on the TRE's fixed container port — bindings on any other
+// container-side port belong to some other service (see TRE_CONTAINER_PORT).
+function bindsHostPort(portsJson, hostPort, urlHost) {
+  for (const b of (portsJson || {})[TRE_CONTAINER_PORT] || []) {
+    if (b && b.HostPort === String(hostPort) && hostMatchesBinding(urlHost, b.HostIp)) return true;
   }
   return false;
 }
 
-// Identify the running container serving a loopback url: a host port is
-// exclusive per docker daemon, so the url's port keys `docker ps` for any
-// observer. Returns { id, startedAt } or undefined (no docker, non-loopback,
-// remote DOCKER_HOST, no match, or ambiguous — fail closed).
+// Identify the running container serving a loopback url. Host ports are NOT
+// exclusive per docker daemon — only within IPv4 on one interface — so the
+// `docker ps --filter publish=` candidates (a filter that is also blind to
+// IPv6-only bindings on Docker Desktop) are narrowed by exact host matching
+// plus the TRE container-port fingerprint (see hostMatchesBinding /
+// bindsHostPort). Returns { id, startedAt } or undefined (no docker,
+// non-loopback, remote DOCKER_HOST, no match, or ambiguous — fail closed,
+// loudly when ambiguous).
 function containerServing(networkUrl) {
   let host, port;
   try {
@@ -121,7 +162,17 @@ function containerServing(networkUrl) {
     } catch {
       continue;
     }
-    if (id && startedAt && bindsHostPort(ports, port)) matches.push({ id, startedAt });
+    if (id && startedAt && bindsHostPort(ports, port, host)) matches.push({ id, startedAt });
+  }
+  if (matches.length > 1) {
+    // Only reachable for unspecified url hosts (e.g. localhost) with multiple
+    // same-port loopback bindings — a literal host matches at most one.
+    console.warn(
+      `[hardhat-tron] multiple containers publish port ${port} for ${networkUrl} ` +
+        `(${matches.map((m) => m.id.slice(0, 12)).join(', ')}); cannot attribute the node to one of them, ` +
+        `falling back to a genesis-derived instance id that cannot distinguish TRE instances.`,
+    );
+    return undefined;
   }
   return matches.length === 1 ? matches[0] : undefined;
 }
@@ -254,22 +305,21 @@ async function ensureUp(cfg, networkUrl, log = () => {}) {
 
   const name = cfg.containerName || defaultContainerName();
 
-  // If the user gave us an explicit name AND the container already
-  // exists from a prior `keepRunning: true` run, restart it instead
-  // of failing on the docker run.
+  // TRE containers are single-boot by construction: the image entrypoint
+  // appends a closing '}' to fullnode.conf on every start, so a restarted
+  // container always dies seconds later on a config parse error while
+  // `docker start` reports success. A leftover container under this name
+  // (e.g. from a prior `keepRunning: true` run) is therefore unusable —
+  // remove it and run fresh instead of restarting it.
   if (cfg.containerName && containerExists(name)) {
-    log(`  starting existing container ${name}`);
-    const r = spawnSync('docker', ['start', name], { encoding: 'utf8' });
-    if (r.status !== 0) {
-      throw new Error(`docker start ${name} failed: ${r.stderr.trim()}`);
-    }
-  } else {
-    log(`  spawning ${cfg.image} as ${name} on port ${cfg.port}`);
-    const args = buildRunArgs(cfg, name);
-    const r = spawnSync('docker', args, { encoding: 'utf8' });
-    if (r.status !== 0) {
-      throw new Error(`docker run failed: ${r.stderr.trim() || r.stdout.trim()}`);
-    }
+    log(`  removing leftover container ${name} (TRE containers are single-boot)`);
+    spawnSync('docker', ['rm', '-f', name], { stdio: 'ignore' });
+  }
+  log(`  spawning ${cfg.image} as ${name} on port ${cfg.port}`);
+  const args = buildRunArgs(cfg, name);
+  const r = spawnSync('docker', args, { encoding: 'utf8' });
+  if (r.status !== 0) {
+    throw new Error(`docker run failed: ${r.stderr.trim() || r.stdout.trim()}`);
   }
 
   try {
@@ -295,10 +345,8 @@ async function ensureUp(cfg, networkUrl, log = () => {}) {
 
   _launched.set(networkUrl, name);
   // A prior container on this url may have been removed outside teardown
-  // (e.g. `docker rm` from another shell), leaving a stale cached id behind —
-  // or, more fundamentally, the `docker start` reuse path above changes
-  // StartedAt, so any cached id for this url is stale by construction.
-  // Evict so this fresh boot re-resolves.
+  // (e.g. `docker rm` from another shell) or replaced just above, leaving a
+  // stale cached id behind. Evict so this fresh boot re-resolves.
   // Lazy require: a top-level one would cycle (instance-id requires this module).
   const { evictInstanceId } = require('../runtime/instance-id');
   evictInstanceId(networkUrl);
@@ -327,6 +375,8 @@ module.exports = {
   launchedContainerFor,
   isLocalTre,
   isLoopbackHost,
+  hostMatchesBinding,
+  bindsHostPort,
   containerServing,
   _setLaunchedForTests,
   _forgetLaunchedForTests,
