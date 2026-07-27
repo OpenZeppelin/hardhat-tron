@@ -191,23 +191,36 @@ public class TreJsonRpcImpl implements TreJsonRpc {
 
     // DposTask.isManualMining is an AtomicBoolean in tronbox/tre:dev but a
     // plain boolean in stock java-tron — probe the live value's type so the
-    // patch works against either runtime.
-    private static boolean readManualMining(java.lang.reflect.Field field, Object target)
+    // patch works against either runtime. Admission must be atomic (native
+    // produceBatch does compareAndSet(false, true)): a separate read-then-set
+    // lets two concurrent tre_mine calls both pass the check and both drive
+    // block production. The AtomicBoolean path gets a real CAS — which also
+    // excludes against the node's own produceBatch — and the stock-boolean
+    // path guards the check-and-set with a process-wide lock.
+    private static final Object MANUAL_MINING_FALLBACK_LOCK = new Object();
+
+    private static boolean tryEnterManualMining(java.lang.reflect.Field field, Object target)
             throws IllegalAccessException {
         Object value = field.get(target);
         if (value instanceof java.util.concurrent.atomic.AtomicBoolean) {
-            return ((java.util.concurrent.atomic.AtomicBoolean) value).get();
+            return ((java.util.concurrent.atomic.AtomicBoolean) value).compareAndSet(false, true);
         }
-        return (Boolean) value;
+        synchronized (MANUAL_MINING_FALLBACK_LOCK) {
+            if ((Boolean) field.get(target)) {
+                return false;
+            }
+            field.setBoolean(target, true);
+            return true;
+        }
     }
 
-    private static void writeManualMining(java.lang.reflect.Field field, Object target, boolean value)
+    private static void exitManualMining(java.lang.reflect.Field field, Object target)
             throws IllegalAccessException {
-        Object current = field.get(target);
-        if (current instanceof java.util.concurrent.atomic.AtomicBoolean) {
-            ((java.util.concurrent.atomic.AtomicBoolean) current).set(value);
+        Object value = field.get(target);
+        if (value instanceof java.util.concurrent.atomic.AtomicBoolean) {
+            ((java.util.concurrent.atomic.AtomicBoolean) value).set(false);
         } else {
-            field.setBoolean(target, value);
+            field.setBoolean(target, false);
         }
     }
 
@@ -222,9 +235,6 @@ public class TreJsonRpcImpl implements TreJsonRpc {
             java.lang.reflect.Field isManualMiningField =
                 this.dposTask.getClass().getDeclaredField("isManualMining");
             isManualMiningField.setAccessible(true);
-            if (readManualMining(isManualMiningField, this.dposTask)) {
-                throw new JsonRpcInternalException("node is already manual mining");
-            }
 
             java.lang.reflect.Field dposServiceField =
                 this.dposTask.getClass().getDeclaredField("dposService");
@@ -258,55 +268,69 @@ public class TreJsonRpcImpl implements TreJsonRpc {
             java.lang.reflect.Method setBlockWaitLock =
                 blockHandle.getClass().getMethod("setBlockWaitLock", boolean.class);
 
-            writeManualMining(isManualMiningField, this.dposTask, true);
-            setBlockWaitLock.invoke(blockHandle, true);
+            // Native produceBatch holds BlockHandle.getLock() while producing;
+            // take the same monitor so a manual mine never interleaves with
+            // the node's own block production.
+            Object produceLock = blockHandle.getClass().getMethod("getLock").invoke(blockHandle);
+            if (produceLock == null) {
+                produceLock = blockHandle;
+            }
+
+            if (!tryEnterManualMining(isManualMiningField, this.dposTask)) {
+                throw new JsonRpcInternalException("node is already manual mining");
+            }
             try {
-                for (int i = 0; i < blocksToMine; i++) {
-                    // Recompute slot/witness/blockTime per iteration so each
-                    // block in a multi-block batch gets a fresh schedule slot
-                    // (matches stock chain semantics, where consecutive
-                    // intra-batch blocks advance one slot each).
-                    long slot = this.dposSlot.getSlot(System.currentTimeMillis() + 50L);
-                    com.google.protobuf.ByteString scheduled = this.dposSlot.getScheduledWitness(slot);
-                    Object miner = miners.get(scheduled);
-                    if (miner == null) {
-                        throw new JsonRpcInternalException("no miner configured for scheduled witness");
-                    }
-                    long blockTime = this.dposSlot.getTime(slot);
-                    // OZ-on-TVM: enforce ≥1-second advance between
-                    // mined blocks when the override is not set. In
-                    // instamine mode (`blockTime=0`), `BLOCK_PRODUCED_INTERVAL`
-                    // is 1ms, so two consecutive tre_mine calls land
-                    // blocks at the SAME `block.timestamp` (second
-                    // resolution) — breaking Governor tests that do
-                    // `waitForSnapshot(snap) → vote()`. Hardhat's
-                    // BLOCK_PRODUCED_INTERVAL is 1 second by default,
-                    // so the vote-tx block naturally lands at snap+1.
-                    //
-                    // We only clamp here (the manual-mine path) and not
-                    // in DposSlot.getTime itself — the validation paths
-                    // (validateWitnessSchedule, etc.) call getTime with
-                    // slot=0/1 to compute expected schedule times, and
-                    // bumping those by +1000ms would fail block-time
-                    // validation on legitimate genesis-era blocks.
-                    if (DposSlot.NEXT_BLOCK_TIMESTAMP_OVERRIDE == 0L) {
-                        long lbht = this.dynamicPropertiesStore.getLatestBlockHeaderTimestamp();
-                        long minimum = lbht + 1000L;
-                        if (blockTime < minimum) {
-                            blockTime = minimum;
+                setBlockWaitLock.invoke(blockHandle, true);
+                synchronized (produceLock) {
+                    for (int i = 0; i < blocksToMine; i++) {
+                        // Recompute slot/witness/blockTime per iteration so each
+                        // block in a multi-block batch gets a fresh schedule slot
+                        // (matches stock chain semantics, where consecutive
+                        // intra-batch blocks advance one slot each).
+                        long slot = this.dposSlot.getSlot(System.currentTimeMillis() + 50L);
+                        com.google.protobuf.ByteString scheduled = this.dposSlot.getScheduledWitness(slot);
+                        Object miner = miners.get(scheduled);
+                        if (miner == null) {
+                            throw new JsonRpcInternalException("no miner configured for scheduled witness");
                         }
+                        long blockTime = this.dposSlot.getTime(slot);
+                        // OZ-on-TVM: enforce ≥1-second advance between
+                        // mined blocks when the override is not set. In
+                        // instamine mode (`blockTime=0`), `BLOCK_PRODUCED_INTERVAL`
+                        // is 1ms, so two consecutive tre_mine calls land
+                        // blocks at the SAME `block.timestamp` (second
+                        // resolution) — breaking Governor tests that do
+                        // `waitForSnapshot(snap) → vote()`. Hardhat's
+                        // BLOCK_PRODUCED_INTERVAL is 1 second by default,
+                        // so the vote-tx block naturally lands at snap+1.
+                        //
+                        // We only clamp here (the manual-mine path) and not
+                        // in DposSlot.getTime itself — the validation paths
+                        // (validateWitnessSchedule, etc.) call getTime with
+                        // slot=0/1 to compute expected schedule times, and
+                        // bumping those by +1000ms would fail block-time
+                        // validation on legitimate genesis-era blocks.
+                        if (DposSlot.NEXT_BLOCK_TIMESTAMP_OVERRIDE == 0L) {
+                            long lbht = this.dynamicPropertiesStore.getLatestBlockHeaderTimestamp();
+                            long minimum = lbht + 1000L;
+                            if (blockTime < minimum) {
+                                blockTime = minimum;
+                            }
+                        }
+                        long deadline = System.currentTimeMillis() + MINE_DEADLINE_BUDGET_MS;
+                        produceMethod.invoke(blockHandle, miner, blockTime, deadline, true);
+                        // After produce, the override is consumed (handled in
+                        // mineInternal's finally block on return). Within a
+                        // multi-block batch, subsequent iterations of this loop
+                        // re-enter getTime/getSlot with override=0 so each block
+                        // gets a fresh, monotonically-advancing timestamp.
+                        DposSlot.NEXT_BLOCK_TIMESTAMP_OVERRIDE = 0L;
                     }
-                    long deadline = System.currentTimeMillis() + MINE_DEADLINE_BUDGET_MS;
-                    produceMethod.invoke(blockHandle, miner, blockTime, deadline, true);
-                    // After produce, the override is consumed (handled in
-                    // mineInternal's finally block on return). Within a
-                    // multi-block batch, subsequent iterations of this loop
-                    // re-enter getTime/getSlot with override=0 so each block
-                    // gets a fresh, monotonically-advancing timestamp.
-                    DposSlot.NEXT_BLOCK_TIMESTAMP_OVERRIDE = 0L;
                 }
             } finally {
-                writeManualMining(isManualMiningField, this.dposTask, false);
+                // Mirror native produceBatch's release order: manual-mining
+                // flag first, then the block wait lock.
+                exitManualMining(isManualMiningField, this.dposTask);
                 setBlockWaitLock.invoke(blockHandle, false);
             }
             return "0x0";

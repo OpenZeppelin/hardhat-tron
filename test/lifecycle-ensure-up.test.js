@@ -1,11 +1,13 @@
 'use strict';
 
-// Proves ensureUp replaces a leftover named container with a fresh `docker
-// run` instead of restarting it. TRE containers are single-boot (the image
-// corrupts its own fullnode.conf on every start), so a restart path can never
-// produce a working node — it burns the readiness timeout and, with
-// keepRunning, wedges every later run. Docker-gated like the rest of the
-// lifecycle suite.
+// Proves ensureUp replaces a STOPPED leftover named container with a fresh
+// `docker run` instead of restarting it. TRE containers are single-boot (the
+// image corrupts its own fullnode.conf on every start), so a restart path can
+// never produce a working node — it burns the readiness timeout and, with
+// keepRunning, wedges every later run. A RUNNING name-squatter is the
+// opposite case: it may be a sibling process's node still booting, so it must
+// survive and the name conflict must surface loudly. Docker-gated like the
+// rest of the lifecycle suite.
 
 const { spawnSync } = require('node:child_process');
 const { expect } = require('chai');
@@ -57,6 +59,39 @@ describe('ensureUp with a leftover named container', function () {
       expect(await lifecycle.isReachable(URL)).to.equal(true);
     } finally {
       lifecycle.teardown(up.name);
+    }
+  });
+
+  it('leaves a running name-squatter alone and fails loudly on the name conflict (docker)', async function () {
+    if (!dockerAvailable()) this.skip();
+    this.timeout(60_000);
+    const name = 'hardhat-tron-running-squatter';
+    const cfg = makeCfg(name);
+    spawnSync('docker', ['rm', '-f', name], { stdio: 'ignore' });
+    // A running container that does not answer the TRE probe — the state of a
+    // sibling process's node mid-boot (or any unrelated service on the name).
+    const run = spawnSync('docker', ['run', '-d', '--name', name, '--entrypoint', 'sleep', cfg.image, 'infinity'], {
+      encoding: 'utf8',
+    });
+    expect(run.status).to.equal(0, run.stderr);
+    const squatterId = run.stdout.trim();
+    try {
+      let err;
+      try {
+        await lifecycle.ensureUp(cfg, URL, () => {});
+      } catch (e) {
+        err = e;
+      }
+      expect(err, 'ensureUp should surface the docker name conflict').to.exist;
+      expect(err.message).to.contain('docker run failed');
+      // The squatter survived, untouched and still running.
+      const ins = spawnSync('docker', ['inspect', '--format', '{{.Id}} {{.State.Running}}', name], {
+        encoding: 'utf8',
+      });
+      expect(ins.status).to.equal(0);
+      expect(ins.stdout.trim()).to.equal(`${squatterId} true`);
+    } finally {
+      spawnSync('docker', ['rm', '-f', name], { stdio: 'ignore' });
     }
   });
 });

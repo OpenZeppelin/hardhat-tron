@@ -10,7 +10,7 @@
 //   * isReachable(url)        -- JSON-RPC tre_version probe, 2s timeout
 //   * ensureUp(cfg, log)      -- docker run + wait-for-ready
 //   * teardown(name)          -- docker rm -f
-//   * containerExists(name)   -- leftover-container detection in ensureUp
+//   * containerState(name)    -- stopped-leftover detection in ensureUp
 //
 // Container layout mirrors `docker run -d -p 9090:9090 tronbox/tre:dev`:
 //   image:     tronbox/tre:dev (or whatever cfg.image is)
@@ -214,11 +214,11 @@ function isReachable(networkUrl, timeoutMs = 2000) {
   });
 }
 
-function containerExists(name) {
-  const r = spawnSync('docker', ['ps', '-a', '--format', '{{.Names}}', '--filter', `name=^${name}$`], {
-    encoding: 'utf8',
-  });
-  return r.status === 0 && r.stdout.trim() === name;
+// 'running' | 'stopped' | undefined (no such container, or docker unavailable).
+function containerState(name) {
+  const r = spawnSync('docker', ['inspect', '--format', '{{.State.Running}}', name], { encoding: 'utf8' });
+  if (r.status !== 0) return undefined;
+  return r.stdout.trim() === 'true' ? 'running' : 'stopped';
 }
 
 // Mine one block so the chain is past genesis before any deploy. Best-effort:
@@ -308,11 +308,14 @@ async function ensureUp(cfg, networkUrl, log = () => {}) {
   // TRE containers are single-boot by construction: the image entrypoint
   // appends a closing '}' to fullnode.conf on every start, so a restarted
   // container always dies seconds later on a config parse error while
-  // `docker start` reports success. A leftover container under this name
+  // `docker start` reports success. A stopped leftover under this name
   // (e.g. from a prior `keepRunning: true` run) is therefore unusable —
-  // remove it and run fresh instead of restarting it.
-  if (cfg.containerName && containerExists(name)) {
-    log(`  removing leftover container ${name} (TRE containers are single-boot)`);
+  // remove it and run fresh instead of restarting it. A running container
+  // that merely failed the reachability probe (e.g. a sibling process's node
+  // still booting) is never removed: the `docker run` below then fails
+  // loudly on the name conflict instead of silently killing it.
+  if (cfg.containerName && containerState(name) === 'stopped') {
+    log(`  removing stopped leftover container ${name} (TRE containers are single-boot)`);
     spawnSync('docker', ['rm', '-f', name], { stdio: 'ignore' });
   }
   log(`  spawning ${cfg.image} as ${name} on port ${cfg.port}`);
@@ -371,7 +374,7 @@ module.exports = {
   ensureUp,
   teardown,
   isReachable,
-  containerExists,
+  containerState,
   launchedContainerFor,
   isLocalTre,
   isLoopbackHost,
