@@ -65,14 +65,12 @@ async function bootCaptureTeardown(containerName) {
   const cfg = makeCfg(containerName);
   const spawned = await lifecycle.ensureUp(cfg, URL, () => {});
   try {
-    instanceIds._clearCache();
     const id = await instanceIds.instanceId({ networkName: 'tre', url: URL, provider: rpcProvider });
     const { tronWeb } = treWeb.makeTronWeb(hreShim);
     const genesis = await tronWeb.trx.getBlock(0);
     return { id, spawned: spawned.spawned, genesisId: genesis && genesis.blockID };
   } finally {
     if (spawned.name) lifecycle.teardown(spawned.name, () => {});
-    instanceIds._clearCache();
   }
 }
 
@@ -111,5 +109,25 @@ describe('TRE instance id across sequential boots', function () {
     // And neither id is merely the genesis-hash fallback for this instance.
     expect(first.id).to.not.equal(`0x${first.genesisId}`);
     expect(second.id).to.not.equal(`0x${second.genesisId}`);
+  });
+
+  it('serves a fresh id after teardown + reboot on the same url (no manual cache clearing)', async function () {
+    this.timeout(300_000);
+    const cfgA = makeCfg('hardhat-tron-evict-a');
+    const a = await lifecycle.ensureUp(cfgA, URL, () => {});
+    let idA;
+    try {
+      idA = await instanceIds.instanceId({ networkName: 'tre', url: URL, provider: rpcProvider });
+    } finally {
+      lifecycle.teardown(a.name);
+    }
+    const cfgB = makeCfg('hardhat-tron-evict-b');
+    const b = await lifecycle.ensureUp(cfgB, URL, () => {});
+    try {
+      const idB = await instanceIds.instanceId({ networkName: 'tre', url: URL, provider: rpcProvider });
+      expect(idB).to.not.equal(idA);
+    } finally {
+      lifecycle.teardown(b.name);
+    }
   });
 });

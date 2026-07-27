@@ -207,6 +207,9 @@ async function ensureUp(cfg, networkUrl, log = () => {}) {
     const logs = spawnSync('docker', ['logs', '--tail', '30', name], { encoding: 'utf8' });
     e.message += `\n--- ${name} logs ---\n${logs.stdout}\n${logs.stderr}`;
     if (!cfg.keepRunning) {
+      // Lazy require: a top-level one would cycle (instance-id requires this module).
+      const { evictInstanceId } = require('../runtime/instance-id');
+      evictInstanceId(networkUrl);
       spawnSync('docker', ['rm', '-f', name], { stdio: 'ignore' });
     }
     throw e;
@@ -219,8 +222,13 @@ async function ensureUp(cfg, networkUrl, log = () => {}) {
 function teardown(name, log = () => {}) {
   if (!name) return;
   log(`  tearing down ${name}`);
+  // Lazy require: a top-level one would cycle (instance-id requires this module).
+  const { evictInstanceId } = require('../runtime/instance-id');
   for (const [url, n] of _launched) {
-    if (n === name) _launched.delete(url);
+    if (n === name) {
+      _launched.delete(url);
+      evictInstanceId(url);
+    }
   }
   spawnSync('docker', ['rm', '-f', name], { stdio: 'ignore' });
 }

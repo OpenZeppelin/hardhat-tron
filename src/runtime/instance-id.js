@@ -21,7 +21,9 @@
 // plugin manage the container lifecycle.
 //
 // The id is immutable for the life of a node, so it is resolved once and cached
-// per (network, url).
+// per url. `networkName` is accepted for the caller's convenience but does not
+// participate in the key: id derivation depends only on the url, and two
+// networks sharing a url point at the same node and must share an id.
 
 const { spawnSync } = require('node:child_process');
 const crypto = require('node:crypto');
@@ -57,8 +59,7 @@ async function genesisInstanceId(provider, url) {
 }
 
 async function instanceId({ networkName, url, provider }) {
-  const cacheKey = `${networkName}:${url}`;
-  const cached = _instanceIdCache.get(cacheKey);
+  const cached = _instanceIdCache.get(url);
   if (cached) return cached;
 
   let id;
@@ -73,15 +74,14 @@ async function instanceId({ networkName, url, provider }) {
     id = await genesisInstanceId(provider, url);
   }
 
-  _instanceIdCache.set(cacheKey, id);
+  _instanceIdCache.set(url, id);
   return id;
 }
 
-// Test-only: drop the memoized id so a suite that boots, tears down, and
-// re-boots a TRE on the same url observes the new instance instead of the
-// cached one.
-function _clearCache() {
-  _instanceIdCache.clear();
+// Called by the TRE lifecycle when it removes the container serving a url,
+// so a later boot on the same url resolves a fresh identity.
+function evictInstanceId(url) {
+  _instanceIdCache.delete(url);
 }
 
-module.exports = { instanceId, _clearCache };
+module.exports = { instanceId, evictInstanceId };

@@ -45,6 +45,7 @@ const instanceIds = require('../src/runtime/instance-id');
 const lifecycle = require('../src/tre/lifecycle');
 
 const GENESIS_HASH = '0x0000000000000000c93baa76a4a508f798a96f59156d9eb17ecede8ec845df2f';
+const LOOPBACK_URL = 'http://127.0.0.1:9090/jsonrpc';
 
 // A wrapped provider stub that answers only the two key-free RPC methods the
 // metadata path is allowed to use. Anything else — hardhat_metadata included —
@@ -66,12 +67,12 @@ function stubProvider(calls) {
 
 describe('TronMetadataProvider', function () {
   afterEach(function () {
-    instanceIds._clearCache();
+    instanceIds.evictInstanceId(LOOPBACK_URL);
   });
 
   it('answers hardhat_metadata on a loopback network without any private key', async function () {
     const calls = [];
-    const provider = new TronMetadataProvider(stubProvider(calls), 'tre', 'http://127.0.0.1:9090/jsonrpc');
+    const provider = new TronMetadataProvider(stubProvider(calls), 'tre', LOOPBACK_URL);
 
     const md = await provider.request({ method: 'hardhat_metadata', params: [] });
 
@@ -104,7 +105,7 @@ describe('TronMetadataProvider', function () {
 
   it('still proxies unrelated methods on a local network', async function () {
     const calls = [];
-    const provider = new TronMetadataProvider(stubProvider(calls), 'tre', 'http://127.0.0.1:9090/jsonrpc');
+    const provider = new TronMetadataProvider(stubProvider(calls), 'tre', LOOPBACK_URL);
     const chainHex = await provider.request({ method: 'eth_chainId', params: [] });
     expect(chainHex).to.equal('0xcd8690dc');
     expect(calls).to.deep.equal(['eth_chainId']);
