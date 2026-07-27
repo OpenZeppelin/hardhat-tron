@@ -1,8 +1,12 @@
 'use strict';
 
-// A stable identifier for a specific TRE node instance, resolved in three
+// A stable identifier for a specific TRE node instance, resolved in four
 // tiers, each tried only if the one before it does not apply:
 //
+//   0. Node-served: a patched TRE answers `tre_instanceId` directly over RPC
+//      (nodeServedInstanceId) — a random id generated once per node process.
+//      Any observer, including one docker-blind to the container, resolves
+//      the same value, so this short-circuits tiers 1-2 entirely.
 //   1. Owned: this plugin launched the container (lifecycle.launchedContainerFor).
 //      Its identity is read via `docker inspect` and MUST succeed — a failure
 //      here throws rather than falling through to a weaker tier, since we know
@@ -20,6 +24,11 @@
 //      deterministic restarts of the same one. Consumers that need a
 //      guaranteed-fresh id per restart should let this plugin manage the
 //      container lifecycle (tier 1) or run it where tier 2 can see it.
+//
+// Container identity (tiers 1-2) is per-boot fresh because docker assigns a
+// new container id on every fresh `docker run`, and `StartedAt` also changes
+// on every `docker start` — so together they distinguish restarts even of a
+// reused container.
 //
 // The id is immutable for the life of a node, so it is resolved once and cached
 // per url. `networkName` is accepted for the caller's convenience but does not
@@ -39,6 +48,14 @@ function hashContainerIdentity(id, startedAt) {
   return '0x' + crypto.createHash('sha256').update(`${id}|${startedAt}`).digest('hex');
 }
 
+// Shared field validation for both container-derived tiers: rejects an empty
+// id, an empty startedAt, or either containing docker's own "<no value>"
+// placeholder (an unset Go template field), before it ever reaches the hash.
+function validatedContainerIdentity(id, startedAt) {
+  if (!id || !startedAt || id.includes('<no value>') || startedAt.includes('<no value>')) return undefined;
+  return hashContainerIdentity(id, startedAt);
+}
+
 // docker container id + StartedAt, hashed. Returns undefined if docker is
 // unavailable, the container is unknown, or the fields could not be read.
 function containerInstanceId(containerName) {
@@ -47,9 +64,26 @@ function containerInstanceId(containerName) {
   });
   if (r.status !== 0) return undefined;
   const raw = (r.stdout || '').trim();
-  if (!raw || raw.includes('<no value>') || raw.startsWith('|') || raw.endsWith('|')) return undefined;
-  const [id, startedAt] = raw.split('|');
-  return hashContainerIdentity(id, startedAt);
+  const s = raw.indexOf('|');
+  if (s === -1) return undefined;
+  return validatedContainerIdentity(raw.slice(0, s), raw.slice(s + 1));
+}
+
+// Tier 0: a patched TRE answers tre_instanceId with a random per-boot id any
+// observer can read. Undefined on stock images or unreachable nodes.
+async function nodeServedInstanceId(url) {
+  try {
+    const res = await fetch(url.replace(/\/jsonrpc$/, '/tre'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tre_instanceId', params: [] }),
+      signal: AbortSignal.timeout(2000),
+    }).then((r) => r.json());
+    const id = res && res.result;
+    return typeof id === 'string' && /^0x[0-9a-f]{64}$/.test(id) ? id : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 // Genesis block hash over plain JSON-RPC. java-tron reports the Tron block ID
@@ -69,27 +103,29 @@ async function instanceId({ networkName, url, provider }) {
   const cached = _instanceIdCache.get(url);
   if (cached) return cached;
 
-  let id;
-  const ownedName = lifecycle.launchedContainerFor(url);
-  if (ownedName) {
-    // We launched this container, so its identity is readable by contract;
-    // falling back would substitute an id that repeats across restarts.
-    id = containerInstanceId(ownedName);
-    if (!id) {
-      throw new Error(
-        `hardhat-tron launched the TRE container "${ownedName}" for ${url} ` +
-          `but could not read its docker identity (docker inspect failed). ` +
-          `Check that docker is still reachable, or remove the container and rerun.`,
-      );
-    }
-  } else {
-    const found = lifecycle.containerServing(url);
-    if (found) id = hashContainerIdentity(found.id, found.startedAt);
-  }
+  let id = await nodeServedInstanceId(url);
   if (!id) {
-    // Last resort: the genesis hash is constant across deterministic boots
-    // of the same image + env, so it cannot distinguish restarts.
-    id = await genesisInstanceId(provider, url);
+    const ownedName = lifecycle.launchedContainerFor(url);
+    if (ownedName) {
+      // We launched this container, so its identity is readable by contract;
+      // falling back would substitute an id that repeats across restarts.
+      id = containerInstanceId(ownedName);
+      if (!id) {
+        throw new Error(
+          `hardhat-tron launched the TRE container "${ownedName}" for ${url} ` +
+            `but could not read its docker identity (docker inspect failed). ` +
+            `Check that docker is still reachable, or remove the container and rerun.`,
+        );
+      }
+    } else {
+      const found = lifecycle.containerServing(url);
+      if (found) id = validatedContainerIdentity(found.id, found.startedAt);
+    }
+    if (!id) {
+      // Last resort: the genesis hash is constant across deterministic boots
+      // of the same image + env, so it cannot distinguish restarts.
+      id = await genesisInstanceId(provider, url);
+    }
   }
 
   _instanceIdCache.set(url, id);

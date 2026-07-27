@@ -28,6 +28,14 @@ trap cleanup EXIT
 echo "→ Spinning up temp build container..."
 docker run -d --name "$TEMP" --entrypoint sleep tronbox/tre:dev infinity >/dev/null
 
+echo "→ Ensuring the container has a JDK (image ships a JRE only)..."
+docker exec "$TEMP" sh -c '
+  command -v javac >/dev/null 2>&1 && exit 0
+  major=$(java -version 2>&1 | sed -n "s/.* version \"\([0-9]*\).*/\1/p")
+  apt-get update -qq
+  apt-get install -y -qq "openjdk-${major}-jdk-headless"
+'
+
 echo "→ Compiling patch sources..."
 docker exec "$TEMP" rm -rf /tmp/src /tmp/build
 docker cp docker/src "$TEMP:/tmp/src"

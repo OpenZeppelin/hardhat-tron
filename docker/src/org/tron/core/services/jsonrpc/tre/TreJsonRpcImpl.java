@@ -312,6 +312,19 @@ public class TreJsonRpcImpl implements TreJsonRpc {
         return "v1.0.4-oz-tron";
     }
 
+    private static final String INSTANCE_ID = newInstanceId();
+
+    private static String newInstanceId() {
+        byte[] buf = new byte[32];
+        new java.security.SecureRandom().nextBytes(buf);
+        return "0x" + Hex.toHexString(buf);
+    }
+
+    @Override
+    public String instanceId() {
+        return INSTANCE_ID;
+    }
+
     @Override
     public boolean start(String threadsParam) throws JsonRpcInvalidParamsException {
         TreUtil.decodeInt(threadsParam);

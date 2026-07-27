@@ -14,6 +14,8 @@
 // the same port, and asserts the two ids differ while the genesis blocks match.
 
 const { spawnSync } = require('node:child_process');
+const fs = require('node:fs');
+const path = require('node:path');
 const { expect } = require('chai');
 
 const lifecycle = require('../src/tre/lifecycle');
@@ -23,6 +25,9 @@ const treWeb = require('../src/runtime/tre-web');
 const PORT = Number(process.env.TRE_INSTANCE_TEST_PORT || 9393);
 const URL = `http://127.0.0.1:${PORT}/jsonrpc`;
 const PRIVATE_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
+// Resolved relative to this file, not process.cwd(), so the jar-gate works
+// regardless of where `npm test` was invoked from.
+const JAR_PATH = path.join(__dirname, '..', 'tre', 'FullNode.jar');
 
 function dockerAvailable() {
   const r = spawnSync('docker', ['version'], { encoding: 'utf8' });
@@ -172,6 +177,34 @@ describe('TRE instance id across sequential boots', function () {
     } finally {
       lifecycle.teardown(a.name);
       lifecycle.teardown(b.name);
+    }
+  });
+
+  it('prefers the node-served id and gives every observer the same value (docker + patched jar)', async function () {
+    if (!dockerAvailable() || !fs.existsSync(JAR_PATH)) this.skip();
+    this.timeout(120000);
+    const cfg = { ...makeCfg('hardhat-tron-tier0'), jarPath: JAR_PATH };
+    const up = await lifecycle.ensureUp(cfg, URL, () => {});
+    try {
+      const ownedId = await instanceIds.instanceId({ networkName: 'tre', url: URL, provider: rpcProvider });
+      expect(ownedId).to.match(/^0x[0-9a-f]{64}$/);
+      // Tier 0 is what the node itself serves, not a container-derived hash --
+      // pin the owned path to the same direct fetch a docker-blind caller would make.
+      const direct = await fetch(URL.replace(/\/jsonrpc$/, '/tre'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tre_instanceId', params: [] }),
+      }).then((r) => r.json());
+      expect(ownedId).to.equal(direct.result);
+      // A docker-blind foreign observer resolves the same id over RPC alone.
+      lifecycle._forgetLaunchedForTests(URL);
+      instanceIds.evictInstanceId(URL);
+      const foreignId = await instanceIds.instanceId({ networkName: 'tre', url: URL, provider: rpcProvider });
+      expect(foreignId).to.equal(ownedId);
+      const genesis = await rpcProvider.request({ method: 'eth_getBlockByNumber', params: ['0x0', false] });
+      expect(ownedId).to.not.equal(genesis.hash);
+    } finally {
+      lifecycle.teardown(up.name);
     }
   });
 });

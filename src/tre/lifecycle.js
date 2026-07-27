@@ -287,6 +287,12 @@ async function ensureUp(cfg, networkUrl, log = () => {}) {
   }
 
   _launched.set(networkUrl, name);
+  // A prior container on this url may have been removed outside teardown
+  // (e.g. `docker rm` from another shell), leaving a stale cached id behind.
+  // Evict so this fresh boot re-resolves.
+  // Lazy require: a top-level one would cycle (instance-id requires this module).
+  const { evictInstanceId } = require('../runtime/instance-id');
+  evictInstanceId(networkUrl);
   return { spawned: true, name, url: networkUrl };
 }
 
