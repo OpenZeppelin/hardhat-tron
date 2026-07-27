@@ -16,7 +16,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   docker daemon — including containers this plugin did not launch — with a
   genesis-block-hash fallback for non-docker or remote stock-image nodes.
   The fallback is identical across deterministic boots of the same image and
-  startup env, so it cannot distinguish restarts.
+  startup env, so it cannot distinguish restarts. If the plugin launched the
+  container itself but its docker identity cannot be read, the call rejects
+  instead of silently substituting a weaker id.
 - `tre_instanceId` JSON-RPC cheatcode in the patched jar: returns a random
   id generated once per node boot.
 - Local TRE networks now answer the `hardhat_metadata` JSON-RPC method

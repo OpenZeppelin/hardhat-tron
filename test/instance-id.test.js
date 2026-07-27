@@ -15,6 +15,7 @@
 
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
+const http = require('node:http');
 const path = require('node:path');
 const { expect } = require('chai');
 
@@ -155,6 +156,7 @@ describe('TRE instance id across sequential boots', function () {
       expect(foreignId).to.not.equal(genesis.hash);
     } finally {
       lifecycle.teardown(up.name);
+      instanceIds.evictInstanceId(URL);
     }
   });
 
@@ -177,6 +179,8 @@ describe('TRE instance id across sequential boots', function () {
     } finally {
       lifecycle.teardown(a.name);
       lifecycle.teardown(b.name);
+      instanceIds.evictInstanceId(URL);
+      instanceIds.evictInstanceId(URL_B);
     }
   });
 
@@ -223,6 +227,41 @@ describe('owned-container identity failures', function () {
       throw new Error('expected instanceId to throw');
     } catch (e) {
       expect(e.message).to.contain('hardhat-tron-no-such-container');
+    }
+  });
+});
+
+// No docker gating: a plain node:http server stands in for a stock TRE node
+// answering /tre with a parsed JSON-RPC error -- the definitive "tier 0 does
+// not apply" case, as opposed to a thrown probe failure.
+describe('nodeServedInstanceId: stock-node answer vs probe failure', function () {
+  it('returns undefined without retry when the node answers with a JSON-RPC error, falling through to genesis', async function () {
+    let hits = 0;
+    const server = http.createServer((req, res) => {
+      hits++;
+      req.resume();
+      req.on('end', () => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: 1, error: { code: -32601, message: 'method not found' } }));
+      });
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = server.address().port;
+    const url = `http://127.0.0.1:${port}/jsonrpc`;
+    const genesisHash = '0x' + 'ab'.repeat(32);
+    const genesisProvider = {
+      async request({ method }) {
+        if (method === 'eth_getBlockByNumber') return { hash: genesisHash };
+        throw new Error(`unexpected method ${method}`);
+      },
+    };
+    try {
+      const id = await instanceIds.instanceId({ networkName: 'tre', url, provider: genesisProvider });
+      expect(id).to.equal(genesisHash);
+      expect(hits).to.equal(1);
+    } finally {
+      instanceIds.evictInstanceId(url);
+      await new Promise((resolve) => server.close(resolve));
     }
   });
 });

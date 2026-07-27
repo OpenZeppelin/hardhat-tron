@@ -12,7 +12,7 @@
 //   * teardown(name)          -- docker rm -f
 //   * containerExists(name)   -- short-circuit on `keepRunning` reuse
 //
-// Container layout mirrors docker-compose.tre.yml:
+// Container layout mirrors `docker run -d -p 9090:9090 tronbox/tre:dev`:
 //   image:     tronbox/tre:dev (or whatever cfg.image is)
 //   env:       deterministic accounts derived from the standard test
 //              mnemonic, identical on every machine
@@ -23,8 +23,8 @@
 //              snapshot/revert path allocates large LinkedHashMaps
 //              that, under ParallelGC, surface as multi-hundred-ms
 //              STW pauses that drop the HTTP keep-alive socket and
-//              fail axios mid-test. Same config as the consumer's
-//              docker-compose.
+//              fail axios mid-test. Same config as that docker run
+//              invocation.
 //
 
 const { spawn, spawnSync } = require('node:child_process');
@@ -38,9 +38,11 @@ function defaultContainerName() {
 // Containers this process launched (docker run or docker start), keyed by the
 // network url they answer on. Populated by ensureUp on the spawn/start path and
 // cleared by teardown. Consumers derive a per-instance identity from the
-// container itself (see runtime/instance-id.js) only for containers we own; a
-// TRE we merely found already reachable (spawned=false) is not recorded, so it
-// falls back to a chain-derived id.
+// container itself (see runtime/instance-id.js) directly for containers we
+// own; a TRE we merely found already reachable (spawned=false) is not
+// recorded here, but is still identified via containerServing (tier 2) or the
+// node's own tre_instanceId (tier 0) -- the chain-derived genesis hash is
+// only the last resort when neither of those applies.
 const _launched = new Map();
 
 function launchedContainerFor(networkUrl) {
@@ -64,7 +66,8 @@ function isLoopbackHost(host) {
 // True when a docker inspect Ports map binds the given host port on a
 // loopback-reachable interface.
 function bindsHostPort(portsJson, hostPort) {
-  for (const bindings of Object.values(portsJson || {})) {
+  for (const [key, bindings] of Object.entries(portsJson || {})) {
+    if (!key.endsWith('/tcp')) continue;
     for (const b of bindings || []) {
       if (!b || b.HostPort !== String(hostPort)) continue;
       const ip = b.HostIp || '';

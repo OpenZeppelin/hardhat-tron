@@ -73,20 +73,34 @@ function containerInstanceId(containerName) {
   return validatedContainerIdentity(raw.slice(0, s), raw.slice(s + 1));
 }
 
+// Single attempt at tier 0: fetch tre_instanceId with a fresh 2s timeout. A
+// stock node still answers over HTTP with a parsed JSON-RPC error, which
+// resolves normally here to undefined -- that is a definitive "tier does not
+// apply", not a probe failure.
+async function fetchNodeServedInstanceId(url) {
+  const res = await fetch(url.replace(/\/jsonrpc$/, '/tre'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tre_instanceId', params: [] }),
+    signal: AbortSignal.timeout(2000),
+  }).then((r) => r.json());
+  const id = res && res.result;
+  return typeof id === 'string' && /^0x[0-9a-f]{64}$/.test(id) ? id : undefined;
+}
+
 // Tier 0: a patched TRE answers tre_instanceId with a random per-boot id any
-// observer can read. Undefined on stock images or unreachable nodes.
+// observer can read. Undefined on stock images or unreachable nodes. A
+// thrown TimeoutError/AbortError may be a transient stall rather than a
+// stock node, so it gets one retry with a fresh timeout; any other exception
+// (connection refused, non-JSON) returns undefined without retry.
 async function nodeServedInstanceId(url) {
-  try {
-    const res = await fetch(url.replace(/\/jsonrpc$/, '/tre'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tre_instanceId', params: [] }),
-      signal: AbortSignal.timeout(2000),
-    }).then((r) => r.json());
-    const id = res && res.result;
-    return typeof id === 'string' && /^0x[0-9a-f]{64}$/.test(id) ? id : undefined;
-  } catch {
-    return undefined;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return await fetchNodeServedInstanceId(url);
+    } catch (err) {
+      if (attempt === 0 && err && (err.name === 'TimeoutError' || err.name === 'AbortError')) continue;
+      return undefined;
+    }
   }
 }
 

@@ -55,11 +55,23 @@ class TronMetadataProvider extends ProviderWrapper {
     // matches eth_chainId — upgrades-core asserts that invariant.
     const chainHex = await this._wrappedProvider.request({ method: 'eth_chainId', params: [] });
     const chainId = parseInt(String(chainHex).replace(/^0x/, ''), 16);
-    const instanceId = await instanceIds.instanceId({
-      networkName: this._networkName,
-      url: this._url,
-      provider: this._wrappedProvider,
-    });
+    let instanceId;
+    try {
+      instanceId = await instanceIds.instanceId({
+        networkName: this._networkName,
+        url: this._url,
+        provider: this._wrappedProvider,
+      });
+    } catch (e) {
+      // upgrades-core wraps its hardhat_metadata call in a catch that swallows
+      // ANY error and silently falls back to a chain-id-keyed manifest, so a
+      // tier-1 throw from instanceId would otherwise never reach the user.
+      console.error(
+        `[hardhat-tron] failed to resolve the TRE instance id: ${e.message} -- ` +
+          `upgrades tooling will fall back to a chain-id-keyed manifest in .openzeppelin/ for this run.`,
+      );
+      throw e;
+    }
     return {
       clientVersion: 'hardhat-tron',
       chainId,
