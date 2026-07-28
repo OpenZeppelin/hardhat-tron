@@ -79,6 +79,7 @@ describe('end-to-end against a running TRE', function () {
     // neither does this fall back to the genesis hash (tier 3).
     const id = await hre.tre.instanceId();
     expect(id).to.match(/^0x[0-9a-f]{64}$/);
+    // A first-probe hiccup could converge the id once here (see instance-id.js); against a healthy local node this is stable.
     // Cached and stable: repeated calls return the same value.
     expect(await hre.tre.instanceId()).to.equal(id);
     const { tronWeb } = hre.tre.makeTronWeb();

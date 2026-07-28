@@ -9,8 +9,8 @@
 //      the same value, so this short-circuits tiers 1-2 entirely. Deliberately
 //      probed for ANY url, not just local ones, so a remote self-hosted
 //      patched TRE still answers; a network that does not answer this costs
-//      at most the 2s timeout, and only once per process since the result is
-//      cached thereafter.
+//      at most ~4s (two 2s attempts); an unanswered probe leaves the id
+//      provisional and is re-probed on later calls (bounded) before settling.
 //   1. Owned: this plugin launched the container (lifecycle.launchedContainerFor).
 //      Its identity is read via `docker inspect` and MUST succeed — a failure
 //      here throws rather than falling through to a weaker tier, since we know
@@ -42,10 +42,13 @@
 // is correct. `StartedAt` participates in the hash as a belt-and-braces guard
 // against an out-of-band `docker start` of a foreign container.
 //
-// The id is immutable for the life of a node, so it is resolved once and cached
-// per url. `networkName` is accepted for the caller's convenience but does not
-// participate in the key: id derivation depends only on the url, and two
-// networks sharing a url point at the same node and must share an id.
+// The id is resolved once and cached per url when the tier-0 probe got an
+// answer. When it did not (timeout, dropped socket), the fallback id is held
+// provisionally: later calls re-probe tier 0 (bounded) so a node that was
+// merely mid-hiccup converges on its served id. `networkName` is accepted for
+// the caller's convenience but does not participate in the key: id derivation
+// depends only on the url, and two networks sharing a url point at the same
+// node and must share an id.
 
 const { spawnSync } = require('node:child_process');
 const crypto = require('node:crypto');
@@ -83,6 +86,7 @@ function containerInstanceId(containerName) {
 
 const PROBE_TIMEOUT_MS = 2000;
 const PROBE_RETRY_DELAY_MS = 100;
+const MAX_PROVISIONAL_REPROBES = 2;
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -146,11 +150,55 @@ async function genesisInstanceId(provider, url) {
   return hash;
 }
 
-async function instanceId({ networkName, url, provider }) {
-  const cached = _instanceIdCache.get(url);
-  if (cached) return cached;
+const _inflight = new Map();
+const _evictGen = new Map();
 
-  let id = (await nodeServedInstanceId(url)).id;
+function commit(url, id) {
+  _instanceIdCache.set(url, { id, provisional: false });
+  return id;
+}
+
+// Concurrent calls for one url share a single resolution: interleaved
+// probes could otherwise commit a stale fallback over a served id.
+async function instanceId(opts) {
+  const cached = _instanceIdCache.get(opts.url);
+  if (cached && !cached.provisional) return cached.id;
+  let p = _inflight.get(opts.url);
+  if (!p) {
+    p = resolveInstanceId(opts).finally(() => _inflight.delete(opts.url));
+    _inflight.set(opts.url, p);
+  }
+  return p;
+}
+
+async function resolveInstanceId({ networkName, url, provider }) {
+  // A cache write is void if teardown evicted the url while a probe was in
+  // flight: the resolved id belongs to the instance that was just removed.
+  const gen = _evictGen.get(url) || 0;
+  const evicted = () => (_evictGen.get(url) || 0) !== gen;
+
+  const cached = _instanceIdCache.get(url);
+  if (cached && !cached.provisional) return cached.id;
+
+  if (cached) {
+    // The probe that produced this id never got an answer, so the node may
+    // serve an id every other observer already agrees on. Re-probe tier 0
+    // only: the lower tiers are deterministic and cannot change.
+    const probe = await nodeServedInstanceId(url);
+    const id = probe.id || cached.id;
+    if (evicted()) return id;
+    if (probe.definitive) return commit(url, id);
+    if (--cached.reprobesLeft > 0) return cached.id;
+    console.warn(
+      `[hardhat-tron] the tre_instanceId probe for ${url} never got an answer; ` +
+        `settling on the fallback instance id. If this node runs the patched TRE jar, ` +
+        `other processes may key their upgrades manifest differently.`,
+    );
+    return commit(url, cached.id);
+  }
+
+  const probe = await nodeServedInstanceId(url);
+  let id = probe.id;
   if (!id) {
     const ownedName = lifecycle.launchedContainerFor(url);
     if (ownedName) {
@@ -175,7 +223,9 @@ async function instanceId({ networkName, url, provider }) {
     }
   }
 
-  _instanceIdCache.set(url, id);
+  if (evicted()) return id;
+  if (probe.definitive) return commit(url, id);
+  _instanceIdCache.set(url, { id, provisional: true, reprobesLeft: MAX_PROVISIONAL_REPROBES });
   return id;
 }
 
@@ -183,6 +233,10 @@ async function instanceId({ networkName, url, provider }) {
 // so a later boot on the same url resolves a fresh identity.
 function evictInstanceId(url) {
   _instanceIdCache.delete(url);
+  // A post-eviction caller must start fresh, not join the dead
+  // instance's in-flight resolution.
+  _inflight.delete(url);
+  _evictGen.set(url, (_evictGen.get(url) || 0) + 1);
 }
 
 module.exports = { instanceId, evictInstanceId };

@@ -16,8 +16,9 @@
 // makes upgrades-core key TRE manifests by chain id AND instance id natively,
 // so its internal deployment/kind lookups and any plugin-side reads resolve the
 // same instance-qualified manifest. The returned shape mirrors the built-in
-// Hardhat Network's response; the instance id is this plugin's stable per-boot
-// identifier (see runtime/instance-id.js).
+// Hardhat Network's response; the instance id is this plugin's per-boot
+// identifier, stable once the node's probe has been answered (see
+// runtime/instance-id.js).
 //
 // Only a LOCAL TRE answers the method. `tron: true` marks every TVM network —
 // nile/shasta/mainnet included — and upgrades-core stores the manifest of any

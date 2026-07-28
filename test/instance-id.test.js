@@ -363,4 +363,141 @@ describe('nodeServedInstanceId: transient failures vs definitive answers', funct
       await srv.close();
     }
   });
+
+  it('converges on the served id on a later call when the whole first probe fails', async function () {
+    const srv = await scriptedServer([resetConn, resetConn, serveId(SERVED_ID)]);
+    const genesis = countingGenesisProvider(GENESIS);
+    try {
+      expect(await instanceIds.instanceId({ networkName: 'tre', url: srv.url, provider: genesis })).to.equal(GENESIS);
+      expect(await instanceIds.instanceId({ networkName: 'tre', url: srv.url, provider: genesis })).to.equal(SERVED_ID);
+      const after = srv.hits();
+      expect(await instanceIds.instanceId({ networkName: 'tre', url: srv.url, provider: genesis })).to.equal(SERVED_ID);
+      expect(srv.hits()).to.equal(after); // now definitively cached
+    } finally {
+      instanceIds.evictInstanceId(srv.url);
+      await srv.close();
+    }
+  });
+
+  it('re-probes tier 0 only: the fallback tiers are not re-resolved on provisional calls', async function () {
+    const srv = await scriptedServer([resetConn]);
+    const genesis = countingGenesisProvider(GENESIS);
+    try {
+      expect(await instanceIds.instanceId({ networkName: 'tre', url: srv.url, provider: genesis })).to.equal(GENESIS);
+      expect(srv.hits()).to.equal(2);
+      expect(await instanceIds.instanceId({ networkName: 'tre', url: srv.url, provider: genesis })).to.equal(GENESIS);
+      expect(srv.hits()).to.equal(4);
+      expect(genesis.calls()).to.equal(1); // tiers 1-3 ran exactly once
+    } finally {
+      instanceIds.evictInstanceId(srv.url);
+      await srv.close();
+    }
+  });
+
+  it('settles after a bounded number of failed re-probes, warning once', async function () {
+    const srv = await scriptedServer([resetConn]);
+    const genesis = countingGenesisProvider(GENESIS);
+    const warns = [];
+    const origWarn = console.warn;
+    console.warn = (m) => warns.push(String(m));
+    try {
+      for (let i = 0; i < 5; i++) {
+        expect(await instanceIds.instanceId({ networkName: 'tre', url: srv.url, provider: genesis })).to.equal(GENESIS);
+      }
+      expect(srv.hits()).to.equal(6); // 2 attempts x (1 initial + 2 re-probes), then settled
+      expect(warns.filter((w) => w.includes('tre_instanceId')).length).to.equal(1);
+    } finally {
+      console.warn = origWarn;
+      instanceIds.evictInstanceId(srv.url);
+      await srv.close();
+    }
+  });
+
+  it('coalesces concurrent calls onto one resolution', async function () {
+    const srv = await scriptedServer([resetConn, serveId(SERVED_ID)]);
+    const genesis = countingGenesisProvider(GENESIS);
+    try {
+      const [a, b] = await Promise.all([
+        instanceIds.instanceId({ networkName: 'tre', url: srv.url, provider: genesis }),
+        instanceIds.instanceId({ networkName: 'tre', url: srv.url, provider: genesis }),
+      ]);
+      expect(a).to.equal(SERVED_ID);
+      expect(b).to.equal(SERVED_ID);
+      expect(srv.hits()).to.equal(2); // one shared probe run, not two
+    } finally {
+      instanceIds.evictInstanceId(srv.url);
+      await srv.close();
+    }
+  });
+
+  it('eviction clears provisional state so a fresh boot re-resolves from scratch', async function () {
+    const srv = await scriptedServer([resetConn]);
+    const genesis = countingGenesisProvider(GENESIS);
+    try {
+      expect(await instanceIds.instanceId({ networkName: 'tre', url: srv.url, provider: genesis })).to.equal(GENESIS);
+      instanceIds.evictInstanceId(srv.url);
+      expect(await instanceIds.instanceId({ networkName: 'tre', url: srv.url, provider: genesis })).to.equal(GENESIS);
+      expect(genesis.calls()).to.equal(2); // full re-resolution, not a tier-0 re-probe
+    } finally {
+      instanceIds.evictInstanceId(srv.url);
+      await srv.close();
+    }
+  });
+
+  it('caches a definitive method-not-found answer and never re-probes it', async function () {
+    const srv = await scriptedServer([
+      (req, res) => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: 1, error: { code: -32601, message: 'method not found' } }));
+      },
+    ]);
+    const genesis = countingGenesisProvider(GENESIS);
+    try {
+      expect(await instanceIds.instanceId({ networkName: 'tre', url: srv.url, provider: genesis })).to.equal(GENESIS);
+      expect(await instanceIds.instanceId({ networkName: 'tre', url: srv.url, provider: genesis })).to.equal(GENESIS);
+      expect(srv.hits()).to.equal(1);
+      expect(genesis.calls()).to.equal(1);
+    } finally {
+      instanceIds.evictInstanceId(srv.url);
+      await srv.close();
+    }
+  });
+});
+
+describe('provisional resolution over an owned container (docker)', function () {
+  const NAME = 'hardhat-tron-provisional-test';
+  before(function () {
+    if (!dockerAvailable()) this.skip();
+    spawnSync('docker', ['rm', '-f', NAME], { stdio: 'ignore' });
+    const r = spawnSync('docker', ['run', '-d', '--name', NAME, 'alpine', 'sleep', '60'], { encoding: 'utf8' });
+    if (r.status !== 0) this.skip();
+  });
+  after(function () {
+    spawnSync('docker', ['rm', '-f', NAME], { stdio: 'ignore' });
+  });
+
+  it('does not commit to the container-derived id after a failed probe', async function () {
+    const SERVED_ID = '0x' + 'ee'.repeat(32);
+    const srv = await scriptedServer([resetConn, resetConn, serveId(SERVED_ID)]);
+    lifecycle._setLaunchedForTests(srv.url, NAME);
+    try {
+      const first = await instanceIds.instanceId({
+        networkName: 'tre',
+        url: srv.url,
+        provider: countingGenesisProvider('0x00'),
+      });
+      expect(first).to.match(/^0x[0-9a-f]{64}$/);
+      expect(first).to.not.equal(SERVED_ID);
+      const second = await instanceIds.instanceId({
+        networkName: 'tre',
+        url: srv.url,
+        provider: countingGenesisProvider('0x00'),
+      });
+      expect(second).to.equal(SERVED_ID);
+    } finally {
+      lifecycle._forgetLaunchedForTests(srv.url);
+      instanceIds.evictInstanceId(srv.url);
+      await srv.close();
+    }
+  });
 });
