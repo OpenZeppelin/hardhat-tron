@@ -114,14 +114,48 @@ function bindsHostPort(portsJson, hostPort, urlHost) {
   return false;
 }
 
+// Choose the single container whose published bindings match the url's host
+// and port, from `docker inspect` lines `id|startedAt|name|portsJson`. More
+// than one match (only reachable for unspecified url hosts like `localhost`
+// with multiple same-port loopback bindings) throws: falling back to the
+// genesis id would give two different TREs one shared manifest.
+function selectServingMatch(inspectLines, port, host, networkUrl) {
+  const matches = [];
+  for (const line of inspectLines) {
+    const parts = line.split('|');
+    if (parts.length < 4) continue;
+    const [id, startedAt, rawName] = parts;
+    let ports;
+    try {
+      // Rejoin in case the ports JSON itself contained a '|'.
+      ports = JSON.parse(parts.slice(3).join('|'));
+    } catch {
+      continue;
+    }
+    if (id && startedAt && bindsHostPort(ports, port, host)) {
+      matches.push({ id, startedAt, name: rawName.replace(/^\//, '') });
+    }
+  }
+  if (matches.length > 1) {
+    throw new Error(
+      `[hardhat-tron] multiple containers publish port ${port} for ${networkUrl}: ` +
+        matches.map((m) => `${m.name} (${m.id.slice(0, 12)})`).join(', ') +
+        `. Cannot attribute the node to one of them; point the network url at the container's ` +
+        `exact loopback address (e.g. http://127.0.0.1:${port}) or stop the containers you are not using.`,
+    );
+  }
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
 // Identify the running container serving a loopback url. Host ports are NOT
 // exclusive per docker daemon — only within IPv4 on one interface — so the
 // `docker ps --filter publish=` candidates (a filter that is also blind to
 // IPv6-only bindings on Docker Desktop) are narrowed by exact host matching
 // plus the TRE container-port fingerprint (see hostMatchesBinding /
 // bindsHostPort). Returns { id, startedAt } or undefined (no docker,
-// non-loopback, remote DOCKER_HOST, no match, or ambiguous — fail closed,
-// loudly when ambiguous).
+// non-loopback, remote DOCKER_HOST, or no match); throws when the match is
+// ambiguous rather than falling back to an id that cannot tell the
+// candidates apart.
 function containerServing(networkUrl) {
   let host, port;
   try {
@@ -142,39 +176,12 @@ function containerServing(networkUrl) {
 
   const ins = spawnSync(
     'docker',
-    ['inspect', '--format', '{{.Id}}|{{.State.StartedAt}}|{{json .NetworkSettings.Ports}}', ...ids],
+    ['inspect', '--format', '{{.Id}}|{{.State.StartedAt}}|{{.Name}}|{{json .NetworkSettings.Ports}}', ...ids],
     { encoding: 'utf8' },
   );
   if (ins.status !== 0) return undefined;
 
-  const matches = [];
-  for (const line of (ins.stdout || '').trim().split('\n')) {
-    const sep2 = line.indexOf('|', line.indexOf('|') + 1);
-    if (sep2 === -1) continue;
-    const idStarted = line.slice(0, sep2);
-    const sep1 = idStarted.indexOf('|');
-    if (sep1 === -1) continue;
-    const id = idStarted.slice(0, sep1);
-    const startedAt = idStarted.slice(sep1 + 1);
-    let ports;
-    try {
-      ports = JSON.parse(line.slice(sep2 + 1));
-    } catch {
-      continue;
-    }
-    if (id && startedAt && bindsHostPort(ports, port, host)) matches.push({ id, startedAt });
-  }
-  if (matches.length > 1) {
-    // Only reachable for unspecified url hosts (e.g. localhost) with multiple
-    // same-port loopback bindings — a literal host matches at most one.
-    console.warn(
-      `[hardhat-tron] multiple containers publish port ${port} for ${networkUrl} ` +
-        `(${matches.map((m) => m.id.slice(0, 12)).join(', ')}); cannot attribute the node to one of them, ` +
-        `falling back to a genesis-derived instance id that cannot distinguish TRE instances.`,
-    );
-    return undefined;
-  }
-  return matches.length === 1 ? matches[0] : undefined;
+  return selectServingMatch((ins.stdout || '').trim().split('\n'), port, host, networkUrl);
 }
 
 // Whether the url denotes a local TRE — a container this process launched or
@@ -380,6 +387,7 @@ module.exports = {
   isLoopbackHost,
   hostMatchesBinding,
   bindsHostPort,
+  selectServingMatch,
   containerServing,
   _setLaunchedForTests,
   _forgetLaunchedForTests,

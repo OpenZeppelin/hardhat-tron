@@ -87,7 +87,13 @@ describe('end-to-end against a running TRE', function () {
     // Only assert the inequality when a stronger-than-genesis source is
     // confirmed for THIS url (tier 0 answers, or docker discovers it) —
     // an unrelated local docker daemon proves nothing about this TRE.
-    if ((await tier0Answers(TRE_URL)) || lifecycle.containerServing(TRE_URL)) {
+    let discovered;
+    try {
+      discovered = lifecycle.containerServing(TRE_URL);
+    } catch {
+      discovered = undefined; // ambiguous — treat as not attributable and skip
+    }
+    if ((await tier0Answers(TRE_URL)) || discovered) {
       expect(id).to.not.contain(genesis.blockID);
     }
   });

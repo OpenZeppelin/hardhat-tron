@@ -163,3 +163,30 @@ describe('containerServing docker integration', function () {
     }
   });
 });
+
+describe('ambiguous discovery (pure)', function () {
+  // Mirrors the inspect format used by containerServing:
+  // {{.Id}}|{{.State.StartedAt}}|{{.Name}}|{{json .NetworkSettings.Ports}}
+  const line = (id, name, hostIp) =>
+    `${id}|2026-07-27T00:00:00.000000000Z|/${name}|${JSON.stringify({ '9090/tcp': [{ HostIp: hostIp, HostPort: '9090' }] })}`;
+
+  it('throws naming every candidate when two containers match an unspecified host', function () {
+    const lines = [line('a'.repeat(64), 'tre-a', '127.0.0.1'), line('b'.repeat(64), 'tre-b', '127.0.0.2')];
+    expect(() => lifecycle.selectServingMatch(lines, '9090', 'localhost', 'http://localhost:9090/jsonrpc')).to.throw(
+      /tre-a \(aaaaaaaaaaaa\)[\s\S]*tre-b \(bbbbbbbbbbbb\)/,
+    );
+  });
+
+  it('returns the single container matching a literal host', function () {
+    const lines = [line('a'.repeat(64), 'tre-a', '127.0.0.1'), line('b'.repeat(64), 'tre-b', '127.0.0.2')];
+    const m = lifecycle.selectServingMatch(lines, '9090', '127.0.0.2', 'http://127.0.0.2:9090/jsonrpc');
+    expect(m && m.id).to.equal('b'.repeat(64));
+  });
+
+  it('returns undefined when nothing matches', function () {
+    const lines = [line('a'.repeat(64), 'tre-a', '127.0.0.1')];
+    expect(lifecycle.selectServingMatch(lines, '9191', '127.0.0.1', 'http://127.0.0.1:9191/jsonrpc')).to.equal(
+      undefined,
+    );
+  });
+});
