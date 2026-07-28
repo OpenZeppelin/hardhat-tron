@@ -319,11 +319,13 @@ async function ensureUp(cfg, networkUrl, log = () => {}) {
   // (e.g. from a prior `keepRunning: true` run) is therefore unusable —
   // remove it and run fresh instead of restarting it. A running container
   // that merely failed the reachability probe (e.g. a sibling process's node
-  // still booting) is never removed: the `docker run` below then fails
-  // loudly on the name conflict instead of silently killing it.
+  // still booting) is never removed: the state check skips it, and the
+  // non-forced `docker rm` refuses atomically if it was started in the
+  // check-to-remove window — the `docker run` below then fails loudly on
+  // the name conflict instead of silently killing it.
   if (cfg.containerName && containerState(name) === 'stopped') {
     log(`  removing stopped leftover container ${name} (TRE containers are single-boot)`);
-    spawnSync('docker', ['rm', '-f', name], { stdio: 'ignore' });
+    spawnSync('docker', ['rm', name], { stdio: 'ignore' });
   }
   log(`  spawning ${cfg.image} as ${name} on port ${cfg.port}`);
   const args = buildRunArgs(cfg, name);
