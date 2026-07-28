@@ -71,17 +71,20 @@ function validatedContainerIdentity(id, startedAt) {
   return hashContainerIdentity(id, startedAt);
 }
 
-// docker container id + StartedAt, hashed. Returns undefined if docker is
-// unavailable, the container is unknown, or the fields could not be read.
+// docker container id + StartedAt, hashed. On failure returns { failure }
+// carrying docker's own stderr so the owned-path throw can name the cause.
 function containerInstanceId(containerName) {
   const r = spawnSync('docker', ['inspect', '--format', '{{.Id}}|{{.State.StartedAt}}', containerName], {
     encoding: 'utf8',
   });
-  if (r.status !== 0) return undefined;
+  if (r.status !== 0) {
+    const detail = (r.stderr || '').trim() || (r.error && r.error.message) || `docker inspect exited ${r.status}`;
+    return { failure: detail };
+  }
   const raw = (r.stdout || '').trim();
   const s = raw.indexOf('|');
-  if (s === -1) return undefined;
-  return validatedContainerIdentity(raw.slice(0, s), raw.slice(s + 1));
+  const id = s === -1 ? undefined : validatedContainerIdentity(raw.slice(0, s), raw.slice(s + 1));
+  return id ? { id } : { failure: `unexpected docker inspect output: ${JSON.stringify(raw)}` };
 }
 
 const PROBE_TIMEOUT_MS = 2000;
@@ -204,11 +207,12 @@ async function resolveInstanceId({ networkName, url, provider }) {
     if (ownedName) {
       // We launched this container, so its identity is readable by contract;
       // falling back would substitute an id that repeats across restarts.
-      id = containerInstanceId(ownedName);
+      const owned = containerInstanceId(ownedName);
+      id = owned.id;
       if (!id) {
         throw new Error(
           `hardhat-tron launched the TRE container "${ownedName}" for ${url} ` +
-            `but could not read its docker identity (docker inspect failed). ` +
+            `but could not read its docker identity: ${owned.failure}. ` +
             `Check that docker is still reachable, or remove the container and rerun.`,
         );
       }

@@ -266,6 +266,12 @@ describe('owned-container identity failures', function () {
       throw new Error('expected instanceId to throw');
     } catch (e) {
       expect(e.message).to.contain('hardhat-tron-no-such-container');
+      // docker's own stderr (or the spawn error) must be surfaced, not the
+      // old generic placeholder. Asserted shape-wise, not text-wise: the
+      // exact stderr differs across docker versions and daemon states
+      // ("No such object", "Cannot connect...", ENOENT without docker).
+      expect(e.message).to.match(/could not read its docker identity: \S/);
+      expect(e.message).to.not.contain('(docker inspect failed)');
     }
   });
 });
