@@ -81,33 +81,54 @@ function containerInstanceId(containerName) {
   return validatedContainerIdentity(raw.slice(0, s), raw.slice(s + 1));
 }
 
-// Single attempt at tier 0: fetch tre_instanceId with a fresh 2s timeout. A
-// stock node still answers over HTTP with a parsed JSON-RPC error, which
-// resolves normally here to undefined -- that is a definitive "tier does not
-// apply", not a probe failure.
+const PROBE_TIMEOUT_MS = 2000;
+const PROBE_RETRY_DELAY_MS = 100;
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// Single attempt at tier 0: fetch tre_instanceId with a fresh timeout. A
+// stock node answers with a parsed JSON-RPC error, which resolves to
+// undefined -- an answer, not a probe failure. Transient statuses (408, 429,
+// 5xx) are thrown so an intermediary's error page is not mistaken for a
+// definitive answer.
 async function fetchNodeServedInstanceId(url) {
   const res = await fetch(url.replace(/\/jsonrpc$/, '/tre'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tre_instanceId', params: [] }),
-    signal: AbortSignal.timeout(2000),
-  }).then((r) => r.json());
-  const id = res && res.result;
+    signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+  });
+  if (res.status === 408 || res.status === 429 || res.status >= 500) {
+    throw new Error(`tre probe: upstream ${res.status}`);
+  }
+  const body = await res.json();
+  const id = body && body.result;
   return typeof id === 'string' && /^0x[0-9a-f]{64}$/.test(id) ? id : undefined;
 }
 
-// Tier 0: a patched TRE answers tre_instanceId with a random per-boot id any
-// observer can read. Undefined on stock images or unreachable nodes. A
-// thrown TimeoutError/AbortError may be a transient stall rather than a
-// stock node, so it gets one retry with a fresh timeout; any other exception
-// (connection refused, non-JSON) returns undefined without retry.
+// A thrown probe error is definitive only when a complete non-JSON body came
+// back (SyntaxError from res.json()): the endpoint answered, it just is not a
+// patched TRE. Every other throw (timeout, reset, refused) is "no answer".
+function isDefinitiveProbeError(err) {
+  return !!err && err.name === 'SyntaxError';
+}
+
+// Tier 0 probe. { id, definitive: true } -- the node served an id;
+// { id: undefined, definitive: true } -- the node answered, tier 0 does not
+// apply; { id: undefined, definitive: false } -- no answer arrived after a
+// retry, so the caller must not commit this observer away from the served id.
 async function nodeServedInstanceId(url) {
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; ; attempt++) {
     try {
-      return await fetchNodeServedInstanceId(url);
+      return { id: await fetchNodeServedInstanceId(url), definitive: true };
     } catch (err) {
-      if (attempt === 0 && err && (err.name === 'TimeoutError' || err.name === 'AbortError')) continue;
-      return undefined;
+      if (isDefinitiveProbeError(err)) return { id: undefined, definitive: true };
+      if (attempt >= 1) return { id: undefined, definitive: false };
+      // The GC pause that dropped the socket may still be running; an
+      // instant retry would just hit it again.
+      await sleep(PROBE_RETRY_DELAY_MS);
     }
   }
 }
@@ -129,7 +150,7 @@ async function instanceId({ networkName, url, provider }) {
   const cached = _instanceIdCache.get(url);
   if (cached) return cached;
 
-  let id = await nodeServedInstanceId(url);
+  let id = (await nodeServedInstanceId(url)).id;
   if (!id) {
     const ownedName = lifecycle.launchedContainerFor(url);
     if (ownedName) {

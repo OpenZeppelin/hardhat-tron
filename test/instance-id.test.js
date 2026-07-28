@@ -70,6 +70,45 @@ function makeRpcProvider(url) {
 }
 const rpcProvider = makeRpcProvider(URL);
 
+// Serves one scripted handler per request index; requests beyond the script
+// reuse the last entry. Lets a test express "reset once, then answer".
+async function scriptedServer(script) {
+  let hits = 0;
+  const server = http.createServer((req, res) => {
+    script[Math.min(hits++, script.length - 1)](req, res);
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  return {
+    url: `http://127.0.0.1:${server.address().port}/jsonrpc`,
+    hits: () => hits,
+    close: () => new Promise((resolve) => server.close(resolve)),
+  };
+}
+
+const resetConn = (req) => (req.socket.resetAndDestroy ? req.socket.resetAndDestroy() : req.socket.destroy());
+const serveId = (id) => (req, res) => {
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ jsonrpc: '2.0', id: 1, result: id }));
+};
+const serveHtml = (req, res) => {
+  res.writeHead(404, { 'Content-Type': 'text/html' });
+  res.end('<html>not found</html>');
+};
+
+function countingGenesisProvider(hash) {
+  let calls = 0;
+  return {
+    calls: () => calls,
+    async request({ method }) {
+      if (method === 'eth_getBlockByNumber') {
+        calls++;
+        return { hash };
+      }
+      throw new Error(`unexpected method ${method}`);
+    },
+  };
+}
+
 async function bootCaptureTeardown(containerName) {
   const cfg = makeCfg(containerName);
   const spawned = await lifecycle.ensureUp(cfg, URL, () => {});
@@ -262,6 +301,66 @@ describe('nodeServedInstanceId: stock-node answer vs probe failure', function ()
     } finally {
       instanceIds.evictInstanceId(url);
       await new Promise((resolve) => server.close(resolve));
+    }
+  });
+});
+
+describe('nodeServedInstanceId: transient failures vs definitive answers', function () {
+  const SERVED_ID = '0x' + 'cd'.repeat(32);
+  const GENESIS = '0x' + 'ab'.repeat(32);
+  let savedDockerHost;
+  before(function () {
+    savedDockerHost = process.env.DOCKER_HOST;
+    process.env.DOCKER_HOST = 'tcp://stub:2376';
+  });
+  after(function () {
+    if (savedDockerHost === undefined) delete process.env.DOCKER_HOST;
+    else process.env.DOCKER_HOST = savedDockerHost;
+  });
+
+  it('recovers from a single connection reset within one call and resolves the served id', async function () {
+    const srv = await scriptedServer([resetConn, serveId(SERVED_ID)]);
+    const genesis = countingGenesisProvider(GENESIS);
+    try {
+      const id = await instanceIds.instanceId({ networkName: 'tre', url: srv.url, provider: genesis });
+      expect(id).to.equal(SERVED_ID);
+      expect(srv.hits()).to.equal(2);
+      expect(genesis.calls()).to.equal(0);
+    } finally {
+      instanceIds.evictInstanceId(srv.url);
+      await srv.close();
+    }
+  });
+
+  it('treats a non-JSON body as a definitive answer and does not retry', async function () {
+    const srv = await scriptedServer([serveHtml]);
+    const genesis = countingGenesisProvider(GENESIS);
+    try {
+      const id = await instanceIds.instanceId({ networkName: 'tre', url: srv.url, provider: genesis });
+      expect(id).to.equal(GENESIS);
+      expect(srv.hits()).to.equal(1);
+    } finally {
+      instanceIds.evictInstanceId(srv.url);
+      await srv.close();
+    }
+  });
+
+  it('treats a 429 from an intermediary as transient and retries', async function () {
+    const srv = await scriptedServer([
+      (req, res) => {
+        res.writeHead(429, { 'Content-Type': 'text/html' });
+        res.end('<html>slow down</html>');
+      },
+      serveId(SERVED_ID),
+    ]);
+    const genesis = countingGenesisProvider(GENESIS);
+    try {
+      const id = await instanceIds.instanceId({ networkName: 'tre', url: srv.url, provider: genesis });
+      expect(id).to.equal(SERVED_ID);
+      expect(srv.hits()).to.equal(2);
+    } finally {
+      instanceIds.evictInstanceId(srv.url);
+      await srv.close();
     }
   });
 });
