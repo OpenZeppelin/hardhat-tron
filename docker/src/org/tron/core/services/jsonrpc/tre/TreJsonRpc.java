@@ -120,4 +120,10 @@ public interface TreJsonRpc {
     // ECRecover semantics. Idempotent (no-op if not present).
     @JsonRpcMethod(value = "tre_stopImpersonatingAccount")
     boolean stopImpersonatingAccount(String addressParam) throws JsonRpcInvalidParamsException;
+
+    // ===== OZ-on-TVM addition =====
+    // Random id generated once per node process; lets any RPC client tell
+    // two boots of an otherwise deterministic chain apart.
+    @JsonRpcMethod(value = "tre_instanceId")
+    String instanceId();
 }

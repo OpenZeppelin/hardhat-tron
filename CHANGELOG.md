@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- `hre.tre.instanceId()`: a stable per-boot identifier for the TRE node the
+  active network points at. Preferred source is the node itself via the new
+  `tre_instanceId` cheatcode (patched jar): a random per-boot value readable
+  by any observer. Otherwise derived from the docker container's identity
+  (container id + start time) whenever the container is visible to the local
+  docker daemon — including containers this plugin did not launch — with a
+  genesis-block-hash fallback for non-docker or remote stock-image nodes.
+  The fallback is identical across deterministic boots of the same image and
+  startup env, so it cannot distinguish restarts. If the plugin launched the
+  container itself but its docker identity cannot be read, the call rejects
+  instead of silently substituting a weaker id.
+- `tre_instanceId` JSON-RPC cheatcode in the patched jar: returns a random
+  id generated once per node boot.
+- Local TRE networks now answer the `hardhat_metadata` JSON-RPC method
+  (previously method-not-found), reporting the chain id and instance id.
+  `@openzeppelin/upgrades-core` probes this method, so development manifests
+  for a local TRE are now stored per instance under the OS temp directory
+  (keyed `<chainId>-<instanceId>`) instead of accumulating in
+  `.openzeppelin/` keyed by chain id alone; a restarted TRE no longer reuses
+  the previous instance's deployment records. Public TVM networks (nile,
+  shasta, mainnet) are unaffected: the method is only answered for local
+  nodes.
+
 ## [0.1.0] - 2026-05-20
 
 Initial public release. The plugin redirects Hardhat's compile + deploy pipeline at the TRON Virtual Machine via a patched `java-tron` container.

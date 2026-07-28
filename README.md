@@ -226,6 +226,8 @@ The lifecycle wrapper skips spawning when:
 
 Teardown is skipped if `keepRunning` is `true` OR if a pre-existing container was reused — the plugin never tears down a container it didn't spawn.
 
+Note that TRE containers are single-boot: the image rewrites its own config on every start, so a stopped container can never be restarted successfully. If a configured `containerName` collides with a stopped leftover (e.g. from a prior `keepRunning: true` run whose node has since exited), the plugin removes it and runs a fresh container instead. A _running_ container on that name is never removed — if it exists but doesn't answer the readiness probe (say, another process's node still booting), the plugin's `docker run` fails loudly with a name conflict rather than killing it.
+
 ### Per-task gates
 
 The three Hardhat tasks the plugin can auto-spawn for behave slightly differently:

@@ -87,6 +87,30 @@ export interface CheatcodeResult<T = unknown> {
 
 export interface TreRuntime {
   makeTronWeb(): { tronWeb: TronWeb; address: string };
+  /**
+   * A stable identifier for the specific TRE node instance the active network
+   * points at. Resolved in order: (1) the node itself, when it runs the patched
+   * jar answering `tre_instanceId` — a random per-boot value any observer can
+   * read, with or without docker access; (2) the docker container's identity
+   * (container id + `StartedAt`) when the container is visible to the local
+   * docker daemon, whether or not this plugin launched it; (3) the genesis
+   * block hash, which is identical for every TRE booted from the same image
+   * and startup env: restarts and unrelated instances then share an id. Run
+   * the patched jar or locally visible docker if you need per-boot uniqueness.
+   * A probe for (1) that gets an answer — including a stock node's "method
+   * not found" — settles the id for the process lifetime. A probe that gets
+   * no answer at all (timeout, dropped socket, refused connection) is retried
+   * once, and the lower-tier id it falls back to is held provisionally: the
+   * next call re-probes, so a node that was merely mid-hiccup converges on
+   * the id it serves and stays on the same manifest as every other observer.
+   * A provisional id can therefore change once early in a process; after two
+   * further unanswered probes it settles as-is with a warning. Worst case the
+   * probe adds ~4s (two 2s attempts) to a call on a network that never
+   * answers; `hardhat_metadata` remains answered only for local TREs. When
+   * this plugin launched the TRE container itself but its docker identity
+   * cannot be read, the promise rejects rather than silently degrading to (3).
+   */
+  instanceId(): Promise<string>;
   rpcCall(tronWeb: TronWeb, method: string, params?: unknown[]): Promise<unknown>;
   mine(tronWeb: TronWeb): Promise<CheatcodeResult<unknown>>;
   setBlockTime(tronWeb: TronWeb, seconds: number): Promise<CheatcodeResult<unknown>>;
