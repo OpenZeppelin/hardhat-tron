@@ -1,0 +1,48 @@
+name: Release candidate
+
+# Builds the ONE canonical release-candidate tarball in CI and records its
+# identity (SHA-256 + npm integrity). The release workflow later publishes
+# EXACTLY these bytes — never a rebuild — so what ships is provably what was
+# verified.
+on:
+  workflow_dispatch:
+
+jobs:
+  pack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - run: npm ci
+      - run: npm run format:check
+      # Same suite CI runs: the e2e block self-skips when no TRE container is
+      # reachable, so this exercises the unit-style tests.
+      - run: npm test
+      # Blocking here (unlike a PR's informational audit): a release candidate
+      # cannot be cut while a high-severity production advisory is open.
+      - name: Production dependency audit (blocking)
+        run: npm audit --omit=dev --audit-level=high
+      - name: Pack the candidate tarball
+        run: |
+          TGZ="$(npm pack | tail -1)"
+          sha256sum "$TGZ" > "$TGZ.sha256"
+          INTEGRITY="sha512-$(openssl dgst -sha512 -binary "$TGZ" | base64 -w0)"
+          {
+            echo "## Release candidate"
+            echo "- file: \`$TGZ\`"
+            echo "- commit: \`$GITHUB_SHA\`"
+            echo "- sha256: \`$(cut -d' ' -f1 "$TGZ.sha256")\`"
+            echo "- npm integrity: \`$INTEGRITY\`"
+            echo
+            echo "Attach \`$TGZ\` and \`$TGZ.sha256\` to the GitHub release unchanged;"
+            echo "the release workflow refuses anything whose hash does not match."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-candidate
+          path: |
+            *.tgz
+            *.tgz.sha256
+          if-no-files-found: error
