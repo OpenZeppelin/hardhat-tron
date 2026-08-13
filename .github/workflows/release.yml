@@ -33,7 +33,10 @@ jobs:
           # publishing; Node 22 ships npm 10.x, which cannot publish via OIDC.
           node-version: 24
           registry-url: https://registry.npmjs.org
-      - run: npm ci
+      # No `npm ci` here on purpose: every step below works from the repo files
+      # alone (package.json, the lockfile, the downloaded tarball), and skipping
+      # the install means no third-party dependency script ever executes in a
+      # job that holds `id-token: write` and can mint the publish credential.
       - name: Check package publish status
         id: check-package
         run: |

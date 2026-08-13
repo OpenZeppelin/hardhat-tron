@@ -23,12 +23,13 @@ jobs:
       # Same suite CI runs: the e2e block self-skips when no TRE container is
       # reachable, so this exercises the unit-style tests.
       - run: npm test
-      # Blocking here (unlike a PR's informational audit): a release candidate
-      # cannot be cut while a high-severity production advisory is open.
+      # Blocking: a release candidate cannot be cut while a high-severity
+      # production advisory is open.
       - name: Production dependency audit (blocking)
         run: npm audit --omit=dev --audit-level=high
       - name: Pack the candidate tarball
         run: |
+          set -o pipefail
           TGZ="$(npm pack | tail -1)"
           sha256sum "$TGZ" > "$TGZ.sha256"
           INTEGRITY="sha512-$(openssl dgst -sha512 -binary "$TGZ" | base64 -w0)"
