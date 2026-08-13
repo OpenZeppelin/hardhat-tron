@@ -7,6 +7,9 @@ name: Release candidate
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   pack:
     runs-on: ubuntu-latest
