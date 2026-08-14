@@ -20,8 +20,8 @@ jobs:
           node-version: 24
       - run: npm ci
       - run: npm run format:check
-      # Same suite CI runs: the e2e block self-skips when no TRE container is
-      # reachable, so this exercises the unit-style tests.
+      # Same suite CI runs: the e2e block is opt-in (E2E=1) and the flag is
+      # not set here, so this deterministically exercises the unit-style tests.
       - run: npm test
       # Blocking: a release candidate cannot be cut while a high-severity
       # production advisory is open.

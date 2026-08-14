@@ -1,13 +1,15 @@
 'use strict';
 
-// End-to-end deploy + call against a running TRE container. Skipped
-// when no TRE is reachable on `TRE_URL` (default
-// http://127.0.0.1:9090/jsonrpc) so CI without Docker runs clean
-// and local development without a container up also runs clean. To
-// exercise the full path locally:
+// End-to-end deploy + call against a running TRE container. Opt-in via
+// `E2E=1` so the outcome of `npm test` is deterministic: without the flag
+// the suite always skips (it never probes the environment), and with the
+// flag it FAILS if no TRE answers on `TRE_URL` (default
+// http://127.0.0.1:9090/jsonrpc) — a half-configured environment can't
+// silently turn "ran the e2e" into "skipped the e2e". To exercise the
+// full path locally:
 //
 //   docker run -d -p 9090:9090 tronbox/tre:dev
-//   npm test
+//   E2E=1 npm test
 //
 // or any equivalent that brings a TRE container up on the
 // configured port.
@@ -41,10 +43,15 @@ describe('end-to-end against a running TRE', function () {
   let hre;
 
   before(async function () {
-    if (!(await isReachable(TRE_URL))) {
+    if (process.env.E2E !== '1') {
       // eslint-disable-next-line no-console
-      console.log(`  [skip] no TRE reachable at ${TRE_URL} — start one to run the e2e tests`);
+      console.log(`  [skip] e2e is opt-in — run \`E2E=1 npm test\` with a TRE up at ${TRE_URL}`);
       this.skip();
+    }
+    if (!(await isReachable(TRE_URL))) {
+      throw new Error(
+        `E2E=1 but no TRE answers at ${TRE_URL} — start one, e.g. \`docker run -d -p 9090:9090 tronbox/tre:dev\``,
+      );
     }
 
     // Hardhat reads its config from the current working directory's
