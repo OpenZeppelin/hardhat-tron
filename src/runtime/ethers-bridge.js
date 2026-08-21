@@ -25,6 +25,12 @@ const fs = require('node:fs');
 const { extendEnvironment } = require('hardhat/config');
 const { ethers: ethersV6 } = require('ethers');
 const { TronWeb } = require('tronweb');
+// Shared address codecs from @openzeppelin/tron-runtime. `toEvmAddress`
+// returns a lowercase EVM `0x` address; `toBase58Address` returns a
+// checksummed `T…` base58 address. Both accept base58, 0x-EVM hex, and
+// 41-prefixed TRON hex. hardhat's wrappers below add EIP-55 checksumming
+// and the object/Typed unwrapping the bridge's callers rely on.
+const { toEvmAddress, toBase58Address } = require('@openzeppelin/tron-runtime');
 
 const signersMod = require('./signers');
 const time = require('./time');
@@ -350,21 +356,20 @@ function _trimCache(m) {
 function tronToHex(addr) {
   if (!addr) return addr;
   if (typeof addr !== 'string') {
-    let hex;
-    const hex21 = TronWeb.address.toHex(addr);
-    hex = '0x' + hex21.slice(2);
-    return ethersV6.getAddress(hex);
+    // Non-string (Addressable / object): preserve the prior TronWeb
+    // path — the runtime codec only accepts strings.
+    return ethersV6.getAddress('0x' + TronWeb.address.toHex(addr).slice(2));
   }
   const cached = _hexCache.get(addr);
   if (cached !== undefined) return cached;
-  let hex;
-  if (addr.startsWith('0x') && addr.length === 42) {
-    hex = addr;
-  } else {
-    const hex21 = TronWeb.address.toHex(addr);
-    hex = '0x' + hex21.slice(2);
-  }
-  const result = ethersV6.getAddress(hex);
+  // Delegate the base58 / 0x-EVM / 41-hex → EVM conversion to the shared
+  // runtime codec, then re-checksum via ethers.getAddress. The runtime
+  // emits a lowercase EVM address; hardhat's callers compare against
+  // ethers utilities (getCreate2Address, getAddress) whose output is
+  // EIP-55-checksummed and case-sensitively equal, so the getAddress
+  // wrap is load-bearing. Proven equal to the old implementation on real
+  // inputs (6/6) prior to adoption.
+  const result = ethersV6.getAddress(toEvmAddress(addr));
   _hexCache.set(addr, result);
   _trimCache(_hexCache);
   return result;
@@ -385,11 +390,14 @@ function toTronBase58(addr) {
   if (addr.startsWith('T') && addr.length === 34) return addr;
   const cached = _base58Cache.get(addr);
   if (cached !== undefined) return cached;
+  // Only the two forms the prior implementation recognized (0x-EVM hex,
+  // 41-prefixed TRON hex) are converted; anything else falls through
+  // unchanged. The runtime codec would throw on unrecognized input, but
+  // hardhat's contract here is to return the value as-is — so gate the
+  // codec call on the recognized forms and delegate the conversion.
   let result;
-  if (addr.startsWith('0x') && addr.length === 42) {
-    result = TronWeb.address.fromHex('41' + addr.slice(2));
-  } else if (/^41[0-9a-fA-F]{40}$/.test(addr)) {
-    result = TronWeb.address.fromHex(addr);
+  if ((addr.startsWith('0x') && addr.length === 42) || /^41[0-9a-fA-F]{40}$/.test(addr)) {
+    result = toBase58Address(addr);
   } else {
     return addr;
   }

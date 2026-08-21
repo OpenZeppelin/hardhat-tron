@@ -8,38 +8,23 @@
 
 const { mine, isTransientFetchError } = require('./cheatcodes');
 
-// JSON parser that preserves integer precision above 2^53. TVM's
-// transaction-info response embeds `callValueInfo[*].callValue` (and
-// similar fields) as raw JSON integers up to Long.MAX_VALUE
-// (~9.22e18 sun). `JSON.parse` quantizes anything above 2^53 to the
-// nearest IEEE-754 double — so a value like 999999999999999999 reads
-// back as 1000000000000000000, and chai-matchers' balance assertions
-// fire off-by-1-wei. We pre-process the text body, wrapping every
-// integer >= 2^53 in quotes (turning it into a JSON string), then
-// hand to `JSON.parse`. Downstream readers do `BigInt(value)` which
-// accepts both strings and numbers, so wrapping is non-breaking.
+// BigInt-safe JSON parser for TVM transaction-info responses. TVM's
+// response embeds `callValueInfo[*].callValue` (and similar fields) as
+// raw JSON integers up to Long.MAX_VALUE (~9.22e18 sun). `JSON.parse`
+// quantizes anything above 2^53 to the nearest IEEE-754 double — so a
+// value like 999999999999999999 reads back as 1000000000000000000, and
+// chai-matchers' balance assertions fire off-by-1-wei.
 //
-// Hot-path note: the regex below is expensive on long bodies. Most
-// responses contain NO integers above 2^53 (15-16 decimal digits) —
-// callValue is only large for parseEther-scale transfers. A cheap
-// pre-scan via `.test` short-circuits the regex on the common case.
-const _LARGE_INT_RE = /(:|,|\[)\s*(-?\d{16,})(?=\s*[,\]\}])/g;
-const _PRESCAN_RE = /\d{16,}/;
-function jsonParseBigSafe(text) {
-  if (!_PRESCAN_RE.test(text)) return JSON.parse(text);
-  const safeLimit = 9007199254740992n; // 2^53
-  const rewritten = text.replace(_LARGE_INT_RE, (_, before, digits) => {
-    let n;
-    try {
-      n = BigInt(digits);
-    } catch {
-      return before + digits;
-    }
-    const abs = n < 0n ? -n : n;
-    return abs >= safeLimit ? `${before}"${digits}"` : `${before}${digits}`;
-  });
-  return JSON.parse(rewritten);
-}
+// This is the shared @openzeppelin/tron-runtime implementation. It
+// replaces hardhat-tron's earlier regex-based rewriter: the runtime's
+// version is a JSON-aware lexical pass (it never touches digits inside
+// string literals) and is fail-closed — it validates the original text
+// with `JSON.parse` before rewriting, so invalid JSON is rejected
+// rather than silently "repaired". Same >=2^53 wrap-in-quotes strategy,
+// so downstream `BigInt(value)` readers are unaffected. Proven
+// byte-equal to the old parser on real TVM bodies (8/8) prior to
+// adoption.
+const { jsonParseBigSafe } = require('@openzeppelin/tron-runtime');
 
 async function _getInfoBigSafe(tronWeb, txId, endpoint) {
   // Use the same fullnode host TronWeb is configured with; bypass
