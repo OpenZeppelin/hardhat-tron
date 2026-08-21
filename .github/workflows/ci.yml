@@ -28,7 +28,7 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
-      # The e2e suite self-skips when no TRE is reachable; CI doesn't
-      # spin up a container, so unit-style tests run and the e2e
-      # block is reported as pending.
+      # The e2e suite is opt-in (E2E=1); the flag is not set here, so
+      # unit-style tests run and the e2e block is reported as pending
+      # regardless of what happens to be reachable on the runner.
       - run: npm test
