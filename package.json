@@ -61,5 +61,8 @@
     "smart-contracts",
     "hardhat",
     "hardhat-plugin"
-  ]
+  ],
+  "overrides": {
+    "tmp": "^0.2.6"
+  }
 }
