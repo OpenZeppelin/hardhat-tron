@@ -119,9 +119,11 @@ jobs:
           PKG="$(jq -r .name package.json)"
           VERSION="$(jq -r .version package.json)"
           PUBLISHED=""
-          for attempt in 1 2 3 4 5; do
+          # A first publish can take npm ~15 minutes to serve (measured on
+          # this package's own 0.1.0), so the window is 40 x 30s.
+          for attempt in $(seq 1 40); do
             PUBLISHED="$(npm view "$PKG@$VERSION" dist.integrity 2>/dev/null || true)"
             [ -n "$PUBLISHED" ] && break
-            sleep 10
+            sleep 30
           done
           test "$PUBLISHED" = "$EXPECTED_INTEGRITY" || { echo "registry integrity '$PUBLISHED' does not match the published file '$EXPECTED_INTEGRITY'"; exit 1; }
