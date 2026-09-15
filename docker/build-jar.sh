@@ -40,7 +40,7 @@ WORK="$(mktemp -d)"
 TEMP="hardhat-tron-jar-build-$$"
 cleanup() {
   docker rm -f "$TEMP" >/dev/null 2>&1 || true
-  rm -rf "$WORK"
+  rm -rf "$WORK" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -71,7 +71,7 @@ echo "→ Stock jar class-file version $MAJOR → javac --release $RELEASE"
 echo "→ Compiling patch sources in $JDK_IMAGE..."
 mkdir -p "$WORK/build"
 cp -R docker/src "$WORK/src"
-docker run --rm -v "$WORK:/work" -w /work "$JDK_IMAGE" sh -c "
+docker run --rm --user "$(id -u):$(id -g)" -v "$WORK:/work" -w /work "$JDK_IMAGE" sh -c "
   javac -encoding UTF-8 --release $RELEASE -classpath /work/upstream.jar -d /work/build \
     \$(find /work/src -name '*.java' | sort)
 "
