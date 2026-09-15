@@ -14,7 +14,8 @@
  */
 
 // OZ-on-TVM patch notes:
-// This file is vendored verbatim from java-tron GreatVoyage-v4.8.0.1
+// This file is vendored verbatim from java-tron GreatVoyage-v4.8.2
+// (the release tronbox/tre 2.0.0 is built from; unchanged through v4.8.2.2)
 // (chainbase/src/main/java/org/tron/core/capsule/TransactionCapsule.java),
 // with two deliberate deltas:
 //
@@ -38,9 +39,20 @@
 //       Motivation, semantics, and security caveats are in
 //       org.tron.core.services.jsonrpc.tre.TreImpersonationRegistry.
 //
-// Everything else is upstream. When bumping java-tron, re-fetch this
-// file from the matching tag, re-apply the same two deltas, and
-// re-build.
+//   (3) TRE's own modifications, reconstructed from the bytecode of the
+//       tronbox/tre 2.0.0 jar (the image ships a TRE-specific java-tron
+//       build, and since we overlay the WHOLE class we would otherwise
+//       silently drop them): `shouldDoSigVerify()` and its use in
+//       `validateSignature(AccountStore, DynamicPropertiesStore)`, plus
+//       the `getWeight` branch that lets a `tre_unlockedAccounts` address
+//       satisfy a permission at full threshold. They implement TRE's
+//       unlocked-accounts feature (skip signature checks for listed
+//       owners) and are marked `TRE addition`.
+//
+// Everything else is upstream. When bumping java-tron / TRE, re-fetch
+// this file from the matching java-tron tag, re-apply the three deltas
+// above, and compare `javap -c -p` of the rebuilt class against the
+// image's stock class to catch new TRE-side changes.
 
 package org.tron.core.capsule;
 
@@ -57,6 +69,7 @@ import com.google.protobuf.CodedOutputStream;
 import com.google.protobuf.GeneratedMessageV3;
 import com.google.protobuf.Internal;
 import com.google.protobuf.InvalidProtocolBufferException;
+import com.google.protobuf.UnknownFieldSet;
 import java.io.IOException;
 import java.security.SignatureException;
 import java.util.ArrayList;
@@ -64,11 +77,13 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.commons.lang3.ArrayUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.tron.common.crypto.ECKey.ECDSASignature;
+import org.tron.common.crypto.Rsv;
 import org.tron.common.crypto.SignInterface;
 import org.tron.common.crypto.SignUtils;
 import org.tron.common.es.ExecutorServiceManager;
@@ -126,6 +141,8 @@ public class TransactionCapsule implements ProtoCapsule<Transaction> {
       .newFixedThreadPool(esName, CommonParameter.getInstance()
           .getValidContractProtoThreadNum());
   private static final String OWNER_ADDRESS = "ownerAddress_";
+  // 2-6 ms in general, so we set 50 ms as the threshold for slow signature verification.
+  private static final long SLOW_SIG_VERIFY_MS = 50;
 
   private Transaction transaction;
   private boolean isVerified = false;
@@ -288,6 +305,12 @@ public class TransactionCapsule implements ProtoCapsule<Transaction> {
   public static long getWeight(Permission permission, byte[] address) {
     List<Key> list = permission.getKeysList();
     for (Key key : list) {
+      // TRE addition: an unlocked account (tre_unlockedAccounts) counts at
+      // full threshold regardless of which key actually signed.
+      if (CommonParameter.getInstance().unlockedAccounts
+          .contains(encode58Check(key.getAddress().toByteArray()))) {
+        return permission.getThreshold();
+      }
       if (key.getAddress().equals(ByteString.copyFrom(address))) {
         return key.getWeight();
       }
@@ -321,7 +344,7 @@ public class TransactionCapsule implements ProtoCapsule<Transaction> {
       long weight = getWeight(permission, address);
       if (weight == 0) {
         throw new PermissionException(
-            ByteArray.toHexString(sig.toByteArray()) + " is signed by " + encode58Check(address)
+            ByteArray.toHexString(hash) + " is signed by " + encode58Check(address)
                 + " but it is not contained of permission.");
       }
       if (ForkController.instance().pass(Parameter.ForkBlockVersionEnum.VERSION_4_7_1)) {
@@ -531,14 +554,8 @@ public class TransactionCapsule implements ProtoCapsule<Transaction> {
   }
 
   public static String getBase64FromByteString(ByteString sign) {
-    byte[] r = sign.substring(0, 32).toByteArray();
-    byte[] s = sign.substring(32, 64).toByteArray();
-    byte v = sign.byteAt(64);
-    if (v < 27) {
-      v += 27; //revId -> v
-    }
-    ECDSASignature signature = ECDSASignature.fromComponents(r, s, v);
-    return signature.toBase64();
+    Rsv rsv = Rsv.fromSignature(sign.toByteArray());
+    return ECDSASignature.fromComponents(rsv.getR(), rsv.getS(), rsv.getV()).toBase64();
   }
 
   public static boolean validateSignature(Transaction transaction,
@@ -579,6 +596,16 @@ public class TransactionCapsule implements ProtoCapsule<Transaction> {
       return true;
     }
     return false;
+  }
+
+  public boolean sanitize() {
+    if (this.transaction.getUnknownFields().asMap().isEmpty()) {
+      return false;
+    }
+    this.transaction = this.transaction.toBuilder()
+        .setUnknownFields(UnknownFieldSet.getDefaultInstance())
+        .build();
+    return true;
   }
 
   public void resetResult() {
@@ -738,6 +765,7 @@ public class TransactionCapsule implements ProtoCapsule<Transaction> {
 
       byte[] hash = getTransactionId().getBytes();
 
+      long startNs = System.nanoTime();
       try {
         if (!validateSignature(this.transaction, hash, accountStore, dynamicPropertiesStore)) {
           isVerified = false;
@@ -746,6 +774,8 @@ public class TransactionCapsule implements ProtoCapsule<Transaction> {
       } catch (SignatureException | PermissionException | SignatureFormatException e) {
         isVerified = false;
         throw new ValidateSignatureException(e.getMessage());
+      } finally {
+        logSlowSigVerify(startNs);
       }
       isVerified = true;
     }
@@ -753,11 +783,26 @@ public class TransactionCapsule implements ProtoCapsule<Transaction> {
   }
 
   /**
+   * WARN-logs when a single signature verification exceeds
+   * {@link #SLOW_SIG_VERIFY_MS}. Package-private so it can be exercised from
+   * tests without forcing a real slow crypto path.
+   */
+  void logSlowSigVerify(long startNs) {
+    long costMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNs);
+    if (costMs > SLOW_SIG_VERIFY_MS) {
+      logger.warn("slow verify: txId={}, sigCount={}, cost={} ms",
+          getTransactionId(), this.transaction.getSignatureCount(), costMs);
+    }
+  }
+
+  /**
    * validate signature
    */
   public boolean validateSignature(AccountStore accountStore,
       DynamicPropertiesStore dynamicPropertiesStore) throws ValidateSignatureException {
-    if (!isVerified) {
+    // TRE addition: `&& shouldDoSigVerify()` — skip verification entirely when
+    // the owner is in `tre_unlockedAccounts`.
+    if (!isVerified && shouldDoSigVerify()) {
       //Do not support multi contracts in one transaction
       Transaction.Contract contract = this.getInstance().getRawData().getContract(0);
       if (contract.getType() != ContractType.ShieldedTransferContract) {
@@ -773,9 +818,18 @@ public class TransactionCapsule implements ProtoCapsule<Transaction> {
           }
         }
       }
-      isVerified = true;
     }
+    isVerified = true;
     return true;
+  }
+
+  /**
+   * TRE addition. False when the transaction's owner is listed in
+   * `tre_unlockedAccounts`, in which case signature verification is skipped.
+   */
+  public boolean shouldDoSigVerify() {
+    byte[] owner = getOwner(getInstance().getRawData().getContract(0));
+    return !CommonParameter.getInstance().unlockedAccounts.contains(encode58Check(owner));
   }
 
   public Sha256Hash getTransactionId() {

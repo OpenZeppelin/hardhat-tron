@@ -1,20 +1,25 @@
 package org.tron.core.services.jsonrpc.tre;
 
+import com.google.common.primitives.UnsignedBytes;
 import com.google.protobuf.ByteString;
+import java.util.Comparator;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicLong;
 import org.bouncycastle.util.encoders.Hex;
 import org.tron.common.crypto.Hash;
 import org.tron.common.parameter.CommonParameter;
+import org.tron.common.utils.ByteArray;
 import org.tron.common.utils.StringUtil;
 import org.tron.consensus.dpos.DposSlot;
 import org.tron.consensus.dpos.DposTask;
 import org.tron.core.ChainBaseManager;
 import org.tron.core.capsule.AccountCapsule;
+import org.tron.core.capsule.BlockCapsule;
 import org.tron.core.capsule.CodeCapsule;
 import org.tron.core.capsule.ContractCapsule;
 import org.tron.core.capsule.ProtoCapsule;
@@ -93,7 +98,14 @@ public class TreJsonRpcImpl implements TreJsonRpc {
         byte[] slot = TreUtil.decodeDataWord(slotParam);
         byte[] value = TreUtil.decodeDataWord(valueParam);
         this.createContractAccountIfNotExist(address);
-        byte[] key = TreUtil.compose(slot, address);
+        // TRE 2.0: version-1 contracts hash the slot into the storage key, so
+        // derive the key with the contract's version (TreUtil.compose/3).
+        int contractVersion = 0;
+        ContractCapsule contractCapsule = this.contractStore.get(address);
+        if (contractCapsule != null) {
+            contractVersion = contractCapsule.getContractVersion();
+        }
+        byte[] key = TreUtil.compose(slot, address, contractVersion);
         StorageRowCapsule storageRowCapsule = new StorageRowCapsule(key, value);
         this.forceWrite((TronStoreWithRevoking) this.storageRowStore, key, (ProtoCapsule) storageRowCapsule);
         return true;
@@ -355,7 +367,9 @@ public class TreJsonRpcImpl implements TreJsonRpc {
 
     @Override
     public String version() {
-        return "v1.0.4-oz-tron";
+        // Base TRE build reports "v1.0.1" on tronbox/tre 2.0.0; the `-oz-tron`
+        // suffix is what the hardhat-tron runtime gates the patched cheatcodes on.
+        return "v2.0.0-oz-tron";
     }
 
     private static final String INSTANCE_ID = newInstanceId();
@@ -389,11 +403,68 @@ public class TreJsonRpcImpl implements TreJsonRpc {
 
     @Override
     public StorageRangeResult storageRangeAt(String blockHashOrNumber, int txIndex, String address, String startKey, int limit) throws JsonRpcInvalidParamsException {
+        // TRE 2.0 semantics (reconstructed from the stock 2.0.0 jar): only the
+        // latest state is served, keys are returned in unsigned lexicographic
+        // order from `startKey`, and `nextKey` is set when `limit` is hit.
+        this.checkLatestState(blockHashOrNumber, txIndex);
+        if (limit <= 0) {
+            throw new JsonRpcInvalidParamsException("limit must be greater than 0");
+        }
         byte[] prefix = new byte[16];
         System.arraycopy(Hash.sha3(TreUtil.decodeAddress(address)), 0, prefix, 0, 16);
+        byte[] start = null;
+        if (startKey != null && !startKey.isEmpty()) {
+            String hex = startKey.startsWith("0x") ? startKey.substring(2) : startKey;
+            if (!hex.isEmpty()) {
+                start = ByteArray.fromHexString(hex);
+            }
+        }
+        Comparator<byte[]> comparator = UnsignedBytes.lexicographicalComparator();
+        TreeMap<byte[], byte[]> sorted = new TreeMap<>(comparator);
+        this.storageRowStore.prefixQuery(prefix).forEach((key, value) -> sorted.put(key.getBytes(), value.getData()));
         StorageRangeResult result = new StorageRangeResult();
-        this.storageRowStore.prefixQuery(prefix).forEach((key, value) -> result.addEntry(Hex.toHexString(key.getBytes()), Hex.toHexString(value.getData())));
+        int count = 0;
+        for (Map.Entry<byte[], byte[]> entry : sorted.entrySet()) {
+            byte[] key = entry.getKey();
+            if (start != null && comparator.compare(key, start) < 0) {
+                continue;
+            }
+            if (count >= limit) {
+                result.setNextKey(Hex.toHexString(key));
+                break;
+            }
+            result.addEntry(Hex.toHexString(key), Hex.toHexString(entry.getValue()));
+            count++;
+        }
         return result;
+    }
+
+    // TRE 2.0: debug_storageRangeAt only supports the head state. Accept
+    // "latest", an empty selector, the head block number (decimal, or hex with
+    // 0x), 0, or the head block hash; reject anything else.
+    private void checkLatestState(String blockHashOrNumber, int txIndex) throws JsonRpcInvalidParamsException {
+        ChainBaseManager chainBaseManager = this.dbManager.getChainBaseManager();
+        if (txIndex > 0) {
+            throw new JsonRpcInvalidParamsException("only the latest/current state is supported, txIndex must be 0");
+        }
+        if (blockHashOrNumber == null || blockHashOrNumber.isEmpty() || "latest".equalsIgnoreCase(blockHashOrNumber)) {
+            return;
+        }
+        long headNumber = chainBaseManager.getHeadBlockNum();
+        BlockCapsule.BlockId headId = chainBaseManager.getHeadBlockId();
+        String headHash = headId.toString();
+        String value = blockHashOrNumber.startsWith("0x") ? blockHashOrNumber.substring(2) : blockHashOrNumber;
+        boolean matchesHash = value.equalsIgnoreCase(headHash);
+        boolean matchesNumber = false;
+        try {
+            long number = blockHashOrNumber.startsWith("0x") ? Long.parseLong(value, 16) : Long.parseLong(value);
+            matchesNumber = number == headNumber || number == 0;
+        } catch (NumberFormatException e) {
+            // not a block number
+        }
+        if (!matchesHash && !matchesNumber) {
+            throw new JsonRpcInvalidParamsException("only the latest/current state is supported");
+        }
     }
 
     // ===== OZ-on-TVM addition =====

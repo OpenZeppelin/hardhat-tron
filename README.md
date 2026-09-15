@@ -260,22 +260,24 @@ bash docker/build-jar.sh
 
 What it does:
 
-1. Spins a temporary `tronbox/tre:dev` container.
-2. Uses its bundled OpenJDK 8 toolchain to compile [`docker/src/**/*.java`](docker/src/) against the image's unpatched `FullNode.jar` (used as the classpath).
-3. Repacks the upstream jar with the patched `.class` files overlaid (a small Python ZIP step handles top-level classes plus their nested inner classes).
-4. Pulls the resulting jar back to the host as `tre/FullNode.jar`. The temp container is torn down on exit.
+1. Copies the stock `FullNode.jar` out of the TRE image (`$TRE_IMAGE`, default `tronbox/tre:dev`) without starting the node.
+2. Compiles [`docker/src/**/*.java`](docker/src/) in a throwaway `eclipse-temurin:17-jdk` container (`$JDK_IMAGE`) against that jar as the classpath. The `--release` level is taken from the stock jar's own class-file version, so the output loads on whatever Java the image ships. (Earlier `tronbox/tre` images bundled OpenJDK 8 and were compiled in-place; the 2.0 image ships a jlink-trimmed JRE with no `javac`, so compilation moved to a dedicated JDK container.)
+3. Repacks the stock jar with the patched `.class` files overlaid (a small Python ZIP step handles top-level classes plus their nested inner classes).
+4. Writes the result to the host as `tre/FullNode.jar`.
 
-Output is gitignored — it's reproducible from `docker/src/` and a 100+ MB jar isn't worth committing.
+Override `TRE_IMAGE` to patch a specific image (e.g. a pinned digest), `JDK_IMAGE` to change the compiler, and `TRE_JAR` if the jar path inside the image ever moves. Output is gitignored — it's reproducible from `docker/src/` and a 100+ MB jar isn't worth committing.
+
+The Java under `docker/src/` overlays whole classes, so it is version-coupled to the TRE image: `TransactionCapsule.java` and `DposSlot.java` are vendored from the image's java-tron release (4.8.2 for `tronbox/tre` 2.x) and carry both the OZ deltas and the image's own modifications to those classes. When bumping the image, re-vendor from the matching java-tron tag, re-apply the OZ deltas, and diff `javap -c -p` of the rebuilt classes against the image's stock classes to catch new upstream changes.
 
 ### Files touched by the patch
 
-| File                                                               | Effect                                                                                                                                                       |
-| ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `org/tron/core/services/jsonrpc/tre/TreJsonRpc.java`               | New JSON-RPC interface declaring the `tre_*` methods                                                                                                         |
-| `org/tron/core/services/jsonrpc/tre/TreJsonRpcImpl.java`           | Implementations — direct AccountStore / CodeStore / ContractStore writes, snapshot/revert via `LinkedHashMap`, version probe returns `v1.0.4-oz-tron`        |
-| `org/tron/core/services/jsonrpc/tre/TreImpersonationRegistry.java` | Per-process whitelist of base58 addresses that bypass ECRecover in `validateSignature`                                                                       |
-| `org/tron/core/capsule/TransactionCapsule.java`                    | Patched: inline check against `TreImpersonationRegistry` in `validateSignature` so txs with a whitelisted `owner_address` skip ECRecover + permission/weight |
-| `org/tron/consensus/dpos/DposSlot.java`                            | Patched: one-shot timestamp override hooks so `tre_setNextBlockTimestamp` can fast-forward chain time without 1:1 wall-clock waits                           |
+| File                                                               | Effect                                                                                                                                                                                                                                                                                        |
+| ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `org/tron/core/services/jsonrpc/tre/TreJsonRpc.java`               | New JSON-RPC interface declaring the `tre_*` methods                                                                                                                                                                                                                                          |
+| `org/tron/core/services/jsonrpc/tre/TreJsonRpcImpl.java`           | Implementations — direct AccountStore / CodeStore / ContractStore writes, snapshot/revert via `LinkedHashMap`, version probe returns `v2.0.0-oz-tron`                                                                                                                                         |
+| `org/tron/core/services/jsonrpc/tre/TreImpersonationRegistry.java` | Per-process whitelist of base58 addresses that bypass ECRecover in `validateSignature`                                                                                                                                                                                                        |
+| `org/tron/core/capsule/TransactionCapsule.java`                    | Vendored from the image's java-tron release; OZ delta: inline check against `TreImpersonationRegistry` in `validateSignature` so txs with a whitelisted `owner_address` skip ECRecover + permission/weight. Also re-carries the image's own `unlockedAccounts` sig-skip (`shouldDoSigVerify`) |
+| `org/tron/consensus/dpos/DposSlot.java`                            | Patched: one-shot timestamp override hooks so `tre_setNextBlockTimestamp` can fast-forward chain time without 1:1 wall-clock waits                                                                                                                                                            |
 
 ### Wiring the jar into Hardhat
 
